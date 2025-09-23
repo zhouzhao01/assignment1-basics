@@ -9,6 +9,8 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+import basic_blocks.basic_blocks as custom_basic_blocks 
+from torch import nn
 
 def run_linear(
     d_in: int,
@@ -29,7 +31,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    linear_layer = custom_basic_blocks.Linear(d_in, d_out)
+    weights_dic = {"W":weights}
+    linear_layer.load_state_dict(weights_dic)
+    return linear_layer(in_features)
 
 
 def run_embedding(
@@ -51,7 +56,10 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    embedding_layer = custom_basic_blocks.Embedding(vocab_size,d_model)
+    embedding_layer.load_state_dict({"weights":weights})
+    output = embedding_layer(token_ids)
+    return output
 
 
 def run_swiglu(
@@ -83,8 +91,16 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
 
+    # print("d_model:{}",d_model)
+    # print("d_ff:{}",d_ff)
+
+    SwiGLU_layer = custom_basic_blocks.SwiGLU(d_model,d_ff)
+    SwiGLU_layer.linear_1.W.data = w1_weight
+    SwiGLU_layer.linear_2.W.data = w2_weight
+    SwiGLU_layer.linear_3.W.data = w3_weight
+
+    return SwiGLU_layer(in_features)
 
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
@@ -200,8 +216,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
-
+    RoPE_layer = custom_basic_blocks.RoPE(theta=theta, d_k=d_k,max_seq_len=max_seq_len)
+    return RoPE_layer(in_query_or_key, token_positions)
 
 def run_transformer_block(
     d_model: int,
@@ -378,7 +394,14 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rmsnorm_calculator = custom_basic_blocks.rmsnorm(
+        d_model=d_model,
+        eps=eps
+    )
+
+    rmsnorm_calculator.load_state_dict({"g":weights})
+
+    return rmsnorm_calculator(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -392,7 +415,9 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    SiLu_layer = custom_basic_blocks.SiLu()
+
+    return SiLu_layer(in_features)
 
 
 def run_get_batch(
@@ -431,8 +456,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
-
+    exp_tensor = torch.exp(in_features - in_features.max(dim=dim, keepdim=True).values)
+    return exp_tensor / exp_tensor.sum(dim=dim, keepdim=True)
 
 def run_cross_entropy(
     inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
