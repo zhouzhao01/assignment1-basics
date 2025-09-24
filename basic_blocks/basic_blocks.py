@@ -181,6 +181,17 @@ class RoPE(nn.Module):
 
         return x 
 
+class softmax(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x:torch.Tensor, dim:int) -> torch.Tensor:
+        max_norm = x - x.max(dim=dim, keepdim=True)
+        numerator = torch.exp(max_norm)
+        dominator = torch.sum(numerator,dim=dim, keepdim=True)
+
+        return numerator / dominator
+
 def unit_RoPE_test():
     d_k = 4
     length_s = 6
@@ -194,5 +205,11 @@ def unit_RoPE_test():
     print(x.shape)
     print(y.shape)
 
+def unit_softmax_test():
+    softmax_cal = softmax()
+    x = torch.rand(4,6)
+    return softmax_cal(x,1)
+
 if __name__ == "__main__":
-    unit_RoPE_test()
+    # unit_RoPE_test()
+    unit_softmax_test()
