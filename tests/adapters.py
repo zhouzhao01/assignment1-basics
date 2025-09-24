@@ -120,8 +120,15 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    """
+    uv run pytest -k test_scaled_dot_product_attention tests your implementation on third-order input tensors, while uv run pytest -k test_4d_scaled_dot_product_attention tests your implementation on fourth-order input tensors.
+    """
+    d_k = Q.shape[-1]
+    d_v = V.shape[-1]
+    SDPA = custom_basic_blocks.scaled_dot_product_attention(d_k=d_k,d_v=d_v)
+    output = SDPA(Q,K,V,mask)
 
+    return output
 
 def run_multihead_self_attention(
     d_model: int,
@@ -154,8 +161,19 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    MHSA = custom_basic_blocks.multihead_self_attention(
+        d_model=d_model,
+        num_heads=num_heads,
+    )
 
+    MHSA.load_state_dict({
+        "W_Q":q_proj_weight,
+        "W_K":k_proj_weight,
+        "W_V":v_proj_weight,
+        "W_O":o_proj_weight}
+    )
+
+    return MHSA(in_features, flag_RoPE=None, flag_mask=True)
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -194,7 +212,24 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+
+    MHSA = custom_basic_blocks.multihead_self_attention(
+        d_model=d_model,
+        num_heads=num_heads,
+        max_seq_len=max_seq_len,
+        theta=theta
+    )
+
+    MHSA.load_state_dict(
+        {
+    "W_Q":q_proj_weight,
+    "W_K":k_proj_weight,
+    "W_V":v_proj_weight,
+    "W_O":o_proj_weight}
+    )
+
+
+    return MHSA(in_features, flag_RoPE=True, flag_mask=True)
 
 
 def run_rope(
@@ -456,8 +491,12 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    exp_tensor = torch.exp(in_features - in_features.max(dim=dim, keepdim=True).values)
-    return exp_tensor / exp_tensor.sum(dim=dim, keepdim=True)
+
+    # exp_tensor = torch.exp(in_features - in_features.max(dim=dim, keepdim=True).values)
+    # exp_tensor / exp_tensor.sum(dim=dim, keepdim=True)
+
+    softmax_cal = custom_basic_blocks.softmax()
+    return softmax_cal(in_features, dim)
 
 def run_cross_entropy(
     inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
