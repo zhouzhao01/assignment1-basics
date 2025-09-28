@@ -73,19 +73,20 @@ class GLU(nn.Module):
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, dim_model:int, dff:int = None):
+    def __init__(self, dim_model:int, dff:int = None, device:str=None):
         super().__init__()
 
         self.dim_model = dim_model
+        self.device = device
 
         if dff == None:
             self.dff = int(round(self.dim_model * 8 / 3 / 64) * 64)
         else:
             self.dff = dff
 
-        self.linear_1 = nn.Parameter(torch.empty(self.dff,        self.dim_model))
-        self.linear_2 = nn.Parameter(torch.empty(self.dim_model,  self.dff))
-        self.linear_3 = nn.Parameter(torch.empty(self.dff,        self.dim_model))
+        self.linear_1 = nn.Parameter(torch.empty(self.dff,        self.dim_model,device=device))
+        self.linear_2 = nn.Parameter(torch.empty(self.dim_model,  self.dff      ,device=device))
+        self.linear_3 = nn.Parameter(torch.empty(self.dff,        self.dim_model,device=device))
 
         torch.nn.init.trunc_normal_(self.linear_1)
         torch.nn.init.trunc_normal_(self.linear_2)
@@ -105,10 +106,11 @@ class RoPE(nn.Module):
 
         self.theta = theta
         self.d_k = d_k
+        self.device = device
 
         # TODO: OPTIMIZATION STEP 1 - Replace rotation matrices with sin/cos caches
         # Current approach: O(max_seq_len × d_k²) memory for full matrices
-        self.rotation_matrix = torch.zeros(max_seq_len,d_k,d_k,device=device)
+        self.rotation_matrix = torch.zeros(max_seq_len,d_k,d_k, device=device)
         for seq_positon in range(max_seq_len):
             self.rotation_matrix[seq_positon,...] = self.cal_rotation_per_position(seq_positon)
 
@@ -127,7 +129,7 @@ class RoPE(nn.Module):
         # TODO: OPTIMIZATION STEP 5 - This method can be removed in optimized version
         # In the optimized implementation, you won't need to build full rotation matrices
         # The sin/cos caches in __init__ will replace this functionality
-        rotation_matrix = torch.zeros(self.d_k, self.d_k)
+        rotation_matrix = torch.zeros(self.d_k, self.d_k, device=self.device)
 
         for k in torch.arange(1, self.d_k/2+1, 1):
             theta_i_d =  token_position / (self.theta ** ((2 * (k - 1)) / self.d_k))
@@ -136,7 +138,8 @@ class RoPE(nn.Module):
                     [torch.cos(theta_i_d), -torch.sin(theta_i_d)],
                     [torch.sin(theta_i_d),  torch.cos(theta_i_d)]
                 ],
-                dtype=torch.float32
+                dtype=torch.float32,
+                device= self.device
             )
             # k: 1, 2, 3, ...
             left = 2 * (k.to(torch.int) - 1)   # left: 0, 2, 4, ...
@@ -160,6 +163,8 @@ class RoPE(nn.Module):
     def forward(self, x:torch.Tensor, token_position:torch.Tensor) -> torch.Tensor:
         # TODO: OPTIMIZATION STEP 3 - Replace matrix multiplication with element-wise ops
         # Current approach: Loop through positions and apply matrix multiplication
+        # x = x.to(self.device)
+        # breakpoint()
         for position in token_position:
             """
             Be careful. It should be x * R.T.
@@ -194,17 +199,19 @@ class softmax(nn.Module):
         return numerator / dominator
     
 class scaled_dot_product_attention(nn.Module):
-    def __init__(self, d_k:int, d_v:int, inf=torch.inf):
+    def __init__(self, d_k:int, d_v:int, inf=torch.inf, device=None):
         super().__init__()
         self.d_k = d_k
         self.d_v = d_v
         self.softmax_layer = softmax()
         self.inf = inf
+
+        self.device = device
     
     def forward(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, mask=None):
         dot_product = torch.einsum("... c k, ... v k -> ... c v", Q, K)
         if mask != None:
-            B  = torch.zeros(mask.shape)
+            B  = torch.zeros(mask.shape, device=self.device)
             B[~mask.to(torch.bool)] = self.inf
             dot_product = dot_product - B
         
@@ -215,22 +222,23 @@ class multihead_self_attention(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
+        self.device = device 
 
         self.d_k = int(d_model / num_heads)
         self.d_v = self.d_k
 
-        self.W_Q = nn.Parameter(torch.empty(num_heads * self.d_k, d_model),requires_grad=True)
-        self.W_K = nn.Parameter(torch.empty(num_heads * self.d_k, d_model),requires_grad=True)
-        self.W_V = nn.Parameter(torch.empty(num_heads * self.d_v, d_model),requires_grad=True)
-        self.W_O = nn.Parameter(torch.empty(d_model, num_heads * self.d_v),requires_grad=True)
+        self.W_Q = nn.Parameter(torch.empty(num_heads * self.d_k, d_model, device=device))
+        self.W_K = nn.Parameter(torch.empty(num_heads * self.d_k, d_model, device=device))
+        self.W_V = nn.Parameter(torch.empty(num_heads * self.d_v, d_model, device=device))
+        self.W_O = nn.Parameter(torch.empty(d_model, num_heads * self.d_v, device=device))
 
         torch.nn.init.trunc_normal_(self.W_Q)
         torch.nn.init.trunc_normal_(self.W_K)
         torch.nn.init.trunc_normal_(self.W_V)
         torch.nn.init.trunc_normal_(self.W_O)
 
-        self.SDPA = scaled_dot_product_attention(self.d_k,self.d_v)
-
+        self.SDPA = scaled_dot_product_attention(self.d_k,self.d_v, device=device)
+        
         if theta and max_seq_len:
             self.RoPE = RoPE(theta=theta,d_k=self.d_k,max_seq_len=max_seq_len,device=device)
 
@@ -271,19 +279,21 @@ class multihead_self_attention(nn.Module):
         return MHSA
     
 class transformer_block(nn.Module):
-    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int):
+    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int, device):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.max_seq_len = max_seq_len
         self.theta = theta
+
+        self.device = device
         
-        self.rmsnorm_1 = rmsnorm(d_model=d_model)
+        self.rmsnorm_1 = rmsnorm(d_model=d_model, device=device)
         self.MHSA = multihead_self_attention(d_model=d_model, num_heads=num_heads, 
-                                             max_seq_len=max_seq_len, theta=theta)
-        self.rmsnorm_2 = rmsnorm(d_model=d_model)
-        self.feedforward = SwiGLU(dim_model=d_model,dff=d_ff)
+                                             max_seq_len=max_seq_len, theta=theta, device=device)
+        self.rmsnorm_2 = rmsnorm(d_model=d_model, device=device)
+        self.feedforward = SwiGLU(dim_model=d_model,dff=d_ff, device=device)
         
 
     def forward(self, x:torch.Tensor, flag_RoPE=True, flag_mask=True) -> torch.Tensor :
@@ -301,6 +311,7 @@ class transformer_lm(nn.Module):
                 num_heads: int,
                 d_ff: int,
                 rope_theta: float,
+                device = None
                  ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -313,22 +324,25 @@ class transformer_lm(nn.Module):
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.rope_theta = rope_theta
+
+        self.device = device
         
         # should be vocab_size, embed_dim
-        self.embedding_layer = Embedding(vocab_size, d_model)
+        self.embedding_layer = Embedding(vocab_size, d_model, device=device)
 
         self.transformer_layers = nn.ModuleList(
             [transformer_block(d_model=d_model,
                                num_heads=num_heads,
                                d_ff=d_ff,
                                max_seq_len=context_length,
-                               theta=rope_theta
+                               theta=rope_theta,
+                               device=device
                                )
                                 for _ in range(num_layers)
                                ]) 
         
-        self.rmsnorm = rmsnorm(d_model=d_model)
-        self.lm_head = Linear(d_model, vocab_size)  # Output layer for language modeling
+        self.rmsnorm = rmsnorm(d_model=d_model,device=device)
+        self.lm_head = Linear(d_model, vocab_size,device=device)  # Output layer for language modeling
     
     def forward(self,in_indices:torch.Tensor) -> torch.Tensor:
         """

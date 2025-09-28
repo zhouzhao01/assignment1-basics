@@ -12,7 +12,7 @@ from typing import Optional
 import math
 
 class AdamW(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, weight_decay=0.01, betas = (0.9, 0.999), eps=1e-8):
+    def __init__(self, params, lr=1e-3, weight_decay=0.01, betas = (0.9, 0.999), eps=1e-8, flag_lr_schedule=False):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if betas[0] < 0:
@@ -22,11 +22,10 @@ class AdamW(torch.optim.Optimizer):
         if weight_decay < 0:
             raise ValueError(f"Invalid weight_decay: {weight_decay}")   
         
-        # self.alpha = alpha
-        # self.beta_1 = beta_1
-        # self.beta_2 = beta_2
-        # self.weight_decay = weight_decay
         self.eps = eps
+        self.flag_lr_schedule = flag_lr_schedule
+        if flag_lr_schedule is True:
+            self.lr_schedule = lr_cosine_schedule(max_learning_rate=1, min_learning_rate=0, warmup_iters=1000, cosine_cycle_iters=1000)
 
         defaults = {
             "alpha": lr,
@@ -37,7 +36,7 @@ class AdamW(torch.optim.Optimizer):
 
         super().__init__(params, defaults)
 
-    def step(self, closure:Optional[Callable]=None):
+    def step(self, iterations:int, closure:Optional[Callable]=None):
         #  Step 1: Calculate loss using closure() 
         loss = None if closure is None else closure()
         
@@ -73,7 +72,10 @@ class AdamW(torch.optim.Optimizer):
                 # Update the parameter, using fancy modified gradients.
                 p.data = p.data - alpha_t * state['exp_avg'] / (torch.sqrt(state['exp_avg_sq']) + self.eps)
                 # Apply Weight Decay.
-                p.data = p.data - alpha * weight_decay * p.data
+                if self.flag_lr_schedule == True:
+                    p.data = p.data - alpha * weight_decay * p.data * self.lr_schedule(iterations)
+                else:
+                    p.data = p.data - alpha * weight_decay * p.data
                 state["step"] += 1 
         return loss
 
@@ -95,7 +97,7 @@ class lr_cosine_schedule(nn.Module):
         else:
             lr = self.a_min
 
-        return 
+        return lr
 
 class grad_clip(nn.Module):
     def __init__(self, max_l2_norm:float, eps:float=1e-6):
@@ -127,11 +129,3 @@ class grad_clip(nn.Module):
             for each_param in parameters:
                 if each_param.grad is not None:
                     each_param.grad *= scaling_factor
-
-
-
-
-
-
-# if __name__ == "__main__":
-#     pass
