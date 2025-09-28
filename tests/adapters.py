@@ -12,6 +12,8 @@ from torch import Tensor
 import basic_blocks.basic_blocks as custom_basic_blocks 
 from torch import nn
 
+import basic_blocks.dataset as custom_dataset
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -440,7 +442,10 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    dataset = custom_dataset.plain_dataset(dataset=dataset, batch_size=batch_size,
+                                           context_length=context_length, device=device)
+    
+    return dataset.get_batch_sample()
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
