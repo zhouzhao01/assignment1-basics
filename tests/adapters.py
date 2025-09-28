@@ -8,9 +8,12 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from torch import nn
 
 import basic_blocks.basic_blocks as custom_basic_blocks 
-from torch import nn
+import basic_blocks.metrics as custom_loss
+
+import basic_blocks.optimizer as custom_optimizer
 
 def run_linear(
     d_in: int,
@@ -324,8 +327,39 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    transformer_block = custom_basic_blocks.transformer_block(
+        d_model=d_model, num_heads=num_heads, d_ff=d_ff,
+        max_seq_len=max_seq_len, theta=theta
+    )
 
+    transformer_block.MHSA.load_state_dict({
+            "W_Q":weights["attn.q_proj.weight"],
+            "W_K":weights["attn.k_proj.weight"],
+            "W_V":weights["attn.v_proj.weight"],
+            "W_O":weights["attn.output_proj.weight"],
+    })
+
+    transformer_block.rmsnorm_1.load_state_dict({
+        "g":weights["ln1.weight"]
+    })
+    transformer_block.rmsnorm_2.load_state_dict({
+    "g":weights["ln2.weight"]
+    })
+
+    # transformer_block.feedforward.load_state_dict({
+    #     "linear_1":weights["ffn.w1.weight"],
+    #     "linear_2":weights["ffn.w2.weight"],
+    #     "linear_3":weights["ffn.w3.weight"],
+
+    # })
+
+    transformer_block.feedforward.linear_1.data = weights["ffn.w1.weight"]
+    transformer_block.feedforward.linear_2.data = weights["ffn.w2.weight"]
+    transformer_block.feedforward.linear_3.data = weights["ffn.w3.weight"]
+
+    output = transformer_block(in_features, flag_RoPE=True, flag_mask=True)
+
+    return output
 
 def run_transformer_lm(
     vocab_size: int,
@@ -406,7 +440,41 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+
+    transformer_lm = custom_basic_blocks.transformer_lm(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta
+    )
+
+    transformer_lm.embedding_layer.load_state_dict({
+        "weights":weights["token_embeddings.weight"]
+    })
+
+    for layer_index, layer in enumerate(transformer_lm.transformer_layers):
+        layer.MHSA.W_Q.data = weights[f"layers.{layer_index}.attn.q_proj.weight"]
+        layer.MHSA.W_K.data = weights[f"layers.{layer_index}.attn.k_proj.weight"]
+        layer.MHSA.W_V.data = weights[f"layers.{layer_index}.attn.v_proj.weight"]
+        layer.MHSA.W_O.data = weights[f"layers.{layer_index}.attn.output_proj.weight"]
+
+        layer.rmsnorm_1.g.data = weights[f"layers.{layer_index}.ln1.weight"]
+        layer.rmsnorm_2.g.data = weights[f"layers.{layer_index}.ln2.weight"]
+
+        layer.feedforward.linear_1.data = weights[f"layers.{layer_index}.ffn.w1.weight"]
+        layer.feedforward.linear_2.data = weights[f"layers.{layer_index}.ffn.w2.weight"]
+        layer.feedforward.linear_3.data = weights[f"layers.{layer_index}.ffn.w3.weight"]
+    
+    transformer_lm.rmsnorm.g.data = weights[f"ln_final.weight"]
+    transformer_lm.lm_head.W.data = weights[f"lm_head.weight"]
+
+    softmax_instance = custom_basic_blocks.softmax()
+
+    output_logic = transformer_lm(in_indices)
+    return output_logic
 
 
 def run_rmsnorm(
@@ -475,7 +543,9 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    from basic_blocks.dataset import plain_dataset as custom_dataset
+    dataset = custom_dataset(dataset,batch_size,context_length,device)
+    return dataset.get_batch()
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -513,7 +583,9 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    CE_loss = custom_loss.cross_entropy_loss()
+    loss = CE_loss(inputs, targets)
+    return loss
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -525,15 +597,16 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
-
+    grad_clip = custom_optimizer.grad_clip(max_l2_norm=max_l2_norm)
+    grad_clip(parameters)
 
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
 
+    Adam = custom_optimizer.AdamW
+    return Adam
 
 def run_get_lr_cosine_schedule(
     it: int,
@@ -560,8 +633,12 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
-
+    lr_sche = custom_optimizer.lr_cosine_schedule(max_learning_rate=max_learning_rate,
+                                                      min_learning_rate=min_learning_rate, 
+                                                      warmup_iters=warmup_iters,
+                                                      cosine_cycle_iters=cosine_cycle_iters,
+                                                      )
+    return lr_sche(it)
 
 def run_save_checkpoint(
     model: torch.nn.Module,

@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from einops import einsum
-
 class Linear(nn.Module):
     def __init__(self, d_in, d_out, device=None, dtype=None):
         super().__init__()
@@ -17,7 +15,7 @@ class Linear(nn.Module):
        
 
     def forward(self, in_features:torch.Tensor) -> torch.Tensor:
-        return torch.einsum("... i, o i -> ... o", in_features, self.W)
+        return torch.einsum("... i, ... o i -> ... o", in_features, self.W)
     
 class Embedding(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
@@ -85,18 +83,21 @@ class SwiGLU(nn.Module):
         else:
             self.dff = dff
 
-        self.linear_1 = Linear(self.dff,self.dim_model)
-        self.linear_2 = Linear(self.dim_model,self.dff)
-        self.linear_3 = Linear(self.dff,self.dim_model)
+        self.linear_1 = nn.Parameter(torch.empty(self.dff,        self.dim_model))
+        self.linear_2 = nn.Parameter(torch.empty(self.dim_model,  self.dff))
+        self.linear_3 = nn.Parameter(torch.empty(self.dff,        self.dim_model))
+
+        torch.nn.init.trunc_normal_(self.linear_1)
+        torch.nn.init.trunc_normal_(self.linear_2)
+        torch.nn.init.trunc_normal_(self.linear_3)
 
         self.SiLU = SiLU()
 
     def forward(self, x:torch.Tensor):
-        return self.linear_2(
-            self.SiLU(
-                self.linear_1(x)) * (self.linear_3(x)
-                )
-            )
+        x1 = self.SiLU(torch.einsum("f d,... s d ->... s f",self.linear_1,x))
+        x3 = torch.einsum("f d,... s d ->... s f",self.linear_3,x)
+        output = torch.einsum("d f,... s f ->... s d",self.linear_2, x1 * x3)
+        return output
 
 class RoPE(nn.Module):
     def __init__(self, theta:float, d_k:int, max_seq_len:int, device=None):
@@ -268,8 +269,88 @@ class multihead_self_attention(nn.Module):
         MHSA = torch.einsum("d v, ... s v -> ... s d", self.W_O, attentions)
 
         return MHSA
+    
+class transformer_block(nn.Module):
+    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        
+        self.rmsnorm_1 = rmsnorm(d_model=d_model)
+        self.MHSA = multihead_self_attention(d_model=d_model, num_heads=num_heads, 
+                                             max_seq_len=max_seq_len, theta=theta)
+        self.rmsnorm_2 = rmsnorm(d_model=d_model)
+        self.feedforward = SwiGLU(dim_model=d_model,dff=d_ff)
         
 
+    def forward(self, x:torch.Tensor, flag_RoPE=True, flag_mask=True) -> torch.Tensor :
+        y = x + self.MHSA(self.rmsnorm_1(x), flag_RoPE=True, flag_mask=True)
+        z = y + self.feedforward(self.rmsnorm_2(y))
+        return z
+
+class transformer_lm(nn.Module):
+    "uv run pytest -k test_transformer_lm"
+    def __init__(self, 
+                vocab_size:int, 
+                context_length:int, 
+                num_layers:int,
+                d_model: int,
+                num_heads: int,
+                d_ff: int,
+                rope_theta: float,
+                 ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.max_seq_len = context_length
+
+        self.num_layers = num_layers
+
+        self.d_models = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.rope_theta = rope_theta
+        
+        # should be vocab_size, embed_dim
+        self.embedding_layer = Embedding(vocab_size, d_model)
+
+        self.transformer_layers = nn.ModuleList(
+            [transformer_block(d_model=d_model,
+                               num_heads=num_heads,
+                               d_ff=d_ff,
+                               max_seq_len=context_length,
+                               theta=rope_theta
+                               )
+                                for _ in range(num_layers)
+                               ]) 
+        
+        self.rmsnorm = rmsnorm(d_model=d_model)
+        self.lm_head = Linear(d_model, vocab_size)  # Output layer for language modeling
+    
+    def forward(self,in_indices:torch.Tensor) -> torch.Tensor:
+        """
+        in_indices: Int[Tensor, " batch_size sequence_length"],
+        Float[Tensor, " batch_size sequence_length vocab_size"]:
+        """
+
+        embed = self.embedding_layer(in_indices) #-> [B, Seq_len, embed_dim]
+
+        # Pass through all transformer layers
+        x = embed
+        for layer in self.transformer_layers:
+            x = layer(x)
+
+        x = self.rmsnorm(x)
+        logits = self.lm_head(x)
+        # Note: Usually don't apply softmax in forward pass - leave as logits
+        return logits
+
+
+
+# Unit test
 def unit_RoPE_test():
     d_k = 4
     length_s = 6
@@ -343,8 +424,230 @@ def test_multihead_self_attention():
 
     print(f"MHSA test passed! Output shape: {output.shape}")
 
+def test_transformer_block():
+    """Minimal test for transformer_block"""
+    # Setup
+    d_model = 128
+    num_heads = 8
+    d_ff = 512
+    max_seq_len = 32
+    theta = 10000.0
+    batch_size = 2
+    seq_len = 16
+
+    # Create block
+    block = transformer_block(d_model, num_heads, d_ff, max_seq_len, theta)
+
+    # Test input
+    x = torch.randn(batch_size, seq_len, d_model)
+
+    # Forward pass
+    output = block(x)
+
+    # Basic checks
+    assert output.shape == x.shape, f"Shape mismatch: {output.shape}"
+    assert torch.isfinite(output).all(), "Output contains NaN/inf"
+    assert not torch.allclose(output, torch.zeros_like(output)), "Output is zero"
+
+def test_transformer_lm():
+    """Minimal test for transformer_lm - under 40 lines total"""
+    # Model hyperparameters
+    vocab_size = 1024
+    context_length = 64
+    num_layers = 2
+    d_model = 128
+    num_heads = 4
+    d_ff = 256
+    rope_theta = 10000.0
+
+    # Create model
+    model = transformer_lm(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta
+    )
+
+    # Test input: batch_size=2, sequence_length=16
+    batch_size, seq_len = 2, 27
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+
+    # Forward pass
+    logits = model(input_ids)
+
+    # Verify output shape and values
+    expected_shape = (batch_size, seq_len, vocab_size)
+    assert logits.shape == expected_shape, f"Expected {expected_shape}, got {logits.shape}"
+    assert torch.isfinite(logits).all(), "Model output contains NaN/inf"
+    assert not torch.allclose(logits, torch.zeros_like(logits)), "Model output is all zeros"
+
+def calculate_model_stats(model, vocab_size, context_length, num_layers, d_model, num_heads, d_ff):
+    """Calculate parameter count and FLOPs for transformer_lm model"""
+
+    print("=" * 60)
+    print("TRANSFORMER_LM MODEL ANALYSIS")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Vocab size: {vocab_size:,}")
+    print(f"  Context length: {context_length:,}")
+    print(f"  Layers: {num_layers}")
+    print(f"  Model dimension: {d_model}")
+    print(f"  Attention heads: {num_heads}")
+    print(f"  FFN dimension: {d_ff}")
+    print()
+
+    # Parameter count breakdown
+    print("PARAMETER BREAKDOWN:")
+    print("-" * 40)
+
+    # 1. Token embeddings
+    embed_params = vocab_size * d_model
+    print(f"Token embeddings:     {embed_params:>12,} ({embed_params/1e6:.1f}M)")
+
+    # 2. Per transformer block
+    # Multi-head attention: W_Q, W_K, W_V each (d_model x d_model), W_O (d_model x d_model)
+    attn_params_per_layer = 4 * d_model * d_model
+
+    # RMSNorm: 2 per block (before attention, before FFN)
+    norm_params_per_layer = 2 * d_model
+
+    # SwiGLU FFN: linear_1 (d_ff x d_model), linear_2 (d_model x d_ff), linear_3 (d_ff x d_model)
+    ffn_params_per_layer = (d_ff * d_model) + (d_model * d_ff) + (d_ff * d_model)
+
+    total_per_layer = attn_params_per_layer + norm_params_per_layer + ffn_params_per_layer
+    transformer_params = num_layers * total_per_layer
+
+    print(f"Per layer:")
+    print(f"  Attention:          {attn_params_per_layer:>12,} ({attn_params_per_layer/1e6:.1f}M)")
+    print(f"  RMSNorm (x2):       {norm_params_per_layer:>12,} ({norm_params_per_layer/1e3:.1f}K)")
+    print(f"  SwiGLU FFN:         {ffn_params_per_layer:>12,} ({ffn_params_per_layer/1e6:.1f}M)")
+    print(f"  Total per layer:    {total_per_layer:>12,} ({total_per_layer/1e6:.1f}M)")
+    print(f"All {num_layers} layers:        {transformer_params:>12,} ({transformer_params/1e6:.1f}M)")
+
+    # 3. Final components
+    final_norm_params = d_model
+    lm_head_params = d_model * vocab_size
+
+    print(f"Final RMSNorm:        {final_norm_params:>12,} ({final_norm_params/1e3:.1f}K)")
+    print(f"LM head:              {lm_head_params:>12,} ({lm_head_params/1e6:.1f}M)")
+
+    # Total parameters
+    total_params = embed_params + transformer_params + final_norm_params + lm_head_params
+    print("-" * 40)
+    print(f"TOTAL PARAMETERS:     {total_params:>12,} ({total_params/1e6:.1f}M)")
+    if total_params >= 1e9:
+        print(f"                      {' ':>12} ({total_params/1e9:.2f}B)")
+
+    # Verify with PyTorch's parameter count
+    pytorch_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print()
+    print("PYTORCH VERIFICATION:")
+    print(f"PyTorch total:        {pytorch_params:>12,} ({pytorch_params/1e6:.1f}M)")
+    print(f"Trainable params:     {trainable_params:>12,} ({trainable_params/1e6:.1f}M)")
+    print(f"Match calculation:    {'✓' if pytorch_params == total_params else '✗'}")
+
+    print()
+    print("FLOP ANALYSIS (Forward Pass):")
+    print("-" * 40)
+
+    # FLOP calculation for different sequence lengths
+    seq_lengths = [128, 256, 512, 1024]
+
+    for seq_len in seq_lengths:
+        if seq_len > context_length:
+            continue
+
+        print(f"Sequence length: {seq_len}")
+
+        # 1. Embedding lookup: negligible FLOPs
+        embed_flops = 0
+
+        # 2. Per transformer layer FLOPs
+        # Attention:
+        # - QKV projections: 3 * seq_len * d_model * d_model
+        # - Attention scores: seq_len * seq_len * d_model (for all heads)
+        # - Attention weights * values: seq_len * seq_len * d_model
+        # - Output projection: seq_len * d_model * d_model
+        attn_flops_per_layer = (
+            3 * seq_len * d_model * d_model +  # QKV projections
+            seq_len * seq_len * d_model +      # Attention computation
+            seq_len * seq_len * d_model +      # Apply attention to values
+            seq_len * d_model * d_model        # Output projection
+        )
+
+        # FFN: 3 linear layers in SwiGLU
+        # linear_1: seq_len * d_model * d_ff
+        # linear_2: seq_len * d_ff * d_model
+        # linear_3: seq_len * d_model * d_ff
+        ffn_flops_per_layer = seq_len * d_model * d_ff * 3
+
+        # RMSNorm: approximate as seq_len * d_model per norm (2 per layer)
+        norm_flops_per_layer = 2 * seq_len * d_model
+
+        layer_flops = attn_flops_per_layer + ffn_flops_per_layer + norm_flops_per_layer
+
+        # 3. Final components
+        final_norm_flops = seq_len * d_model
+        lm_head_flops = seq_len * d_model * vocab_size
+
+        total_flops = (
+            embed_flops +
+            num_layers * layer_flops +
+            final_norm_flops +
+            lm_head_flops
+        )
+
+        print(f"  Per layer:          {layer_flops/1e9:>8.2f} GFLOP")
+        print(f"  All layers:         {(num_layers * layer_flops)/1e9:>8.2f} GFLOP")
+        print(f"  LM head:            {lm_head_flops/1e9:>8.2f} GFLOP")
+        print(f"  Total:              {total_flops/1e9:>8.2f} GFLOP")
+        print()
+
+    # Memory estimation (rough)
+    print("MEMORY ESTIMATION (FP32):")
+    print("-" * 40)
+    param_memory_gb = total_params * 4 / (1024**3)  # 4 bytes per float32
+    print(f"Parameters:           {param_memory_gb:>8.2f} GB")
+
+    # Activation memory for max context length (very rough estimate)
+    # Mainly attention scores and intermediate activations
+    activation_memory_gb = (context_length**2 * num_heads * num_layers * 4) / (1024**3)
+    print(f"Activations (est):    {activation_memory_gb:>8.2f} GB")
+    print(f"Total (est):          {param_memory_gb + activation_memory_gb:>8.2f} GB")
+
+    print("=" * 60)
+
 if __name__ == "__main__":
     # unit_RoPE_test()
     # unit_softmax_test()
     # test_attention()
-    test_multihead_self_attention()
+    # test_multihead_self_attention()
+    # test_transformer_block()
+    # test_transformer_lm()
+
+    # Model configuration
+    vocab_size = 50257
+    context_length = 1024
+    num_layers = 48
+    d_model = 1600
+    num_heads = 25
+    d_ff = 1600
+
+    # Create model
+    model = transformer_lm(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=10000.0
+    )
+
+    # Calculate and display model statistics
+    calculate_model_stats(model, vocab_size, context_length, num_layers, d_model, num_heads, d_ff)

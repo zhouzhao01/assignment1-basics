@@ -22,6 +22,7 @@ dependencies = [
     "ipynb>=0.5.1",
     "ipykernel>=6.30.1",
     "pip>=25.2",
+    "matplot>=0.1.9",
 ]
 
 [build-system]
