@@ -1,6 +1,8 @@
 import torch
 import os
 from typing import IO, Any, BinaryIO
+import json
+from pathlib import Path
 
 from dataset import plain_dataset
 from metrics import cross_entropy_loss
@@ -22,6 +24,126 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+
+class builder():
+    """
+    Config-driven builder for constructing model, optimizer, dataset, and trainer.
+    Stateless design: each build method returns a new instance without storing state.
+    """
+    def __init__(self, config_path: str):
+        """Read from config path, load and validate required fields exist"""
+        self.config_path = config_path
+        self.config = self._load_config(config_path)
+        self._validate_required_fields()
+
+    def _load_config(self, path: str) -> dict:
+        """Load JSON config file"""
+        with open(path, 'r') as f:
+            return json.load(f)
+
+    def _validate_required_fields(self):
+        """Check that all required config sections and fields exist"""
+        required = ['exp_name', 'seed', 'device', 'model', 'training',
+                    'optimizer', 'lr_scheduler', 'data', 'checkpoint']
+        for field in required:
+            if field not in self.config:
+                raise ValueError(f"Missing required config field: {field}")
+
+    def get_exp_dir(self) -> Path:
+        """Get experiment directory path (doesn't create it)"""
+        base_dir = Path(self.config['checkpoint']['save_dir'])
+        return base_dir / self.config['exp_name']
+
+    def setup_experiment_dir(self) -> Path:
+        """Create experiment directory and save config.json to it"""
+        exp_dir = self.get_exp_dir()
+        exp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save config to experiment directory for reproducibility
+        config_save_path = exp_dir / 'config.json'
+        with open(config_save_path, 'w') as f:
+            json.dump(self.config, f, indent=4)
+
+        return exp_dir
+
+    def get_dataset_size(self) -> int:
+        """Load dataset file and return total number of tokens"""
+        data_path = self.config['data']['train_dataset']
+        data = np.memmap(data_path, dtype=np.int32, mode='r')
+        return len(data)
+
+    def calculate_total_batches(self) -> int:
+        """Calculate total training batches from config + dataset size"""
+        dataset_size = self.get_dataset_size()
+        batch_size = self.config['training']['batch_size']
+        context_length = self.config['model']['context_length']
+        epoch = self.config['training']['epoch']
+
+        tokens_per_batch = batch_size * context_length
+        batches_per_epoch = dataset_size // tokens_per_batch
+        return batches_per_epoch * epoch
+
+    def build_model(self) -> transformer_lm:
+        """Build transformer model from config"""
+        m = self.config['model']
+        return transformer_lm(
+            vocab_size=m['vocab_size'],
+            context_length=m['context_length'],
+            num_layers=m['num_layers'],
+            d_model=m['d_model'],
+            num_heads=m['num_heads'],
+            d_ff=m['d_ff'],
+            rope_theta=m['rope_theta'],
+            device=self.config['device']
+        )
+
+    def build_dataset(self) -> plain_dataset:
+        """Build dataset from config"""
+        data_path = self.config['data']['train_dataset']
+        data = np.memmap(data_path, dtype=np.int32, mode='r')
+
+        return plain_dataset(
+            dataset=data,
+            batch_size=self.config['training']['batch_size'],
+            context_length=self.config['model']['context_length'],
+            device=self.config['device']
+        )
+
+    def build_optimizer(self, model: torch.nn.Module) -> torch.optim.AdamW:
+        """Build AdamW optimizer from config"""
+        opt = self.config['optimizer']
+        return torch.optim.AdamW(
+            params=model.parameters(),
+            lr=opt['lr'],
+            betas=tuple(opt['betas']),
+            eps=opt['eps'],
+            weight_decay=opt['weight_decay']
+        )
+
+    def build_lr_schedule(self, optimizer: torch.optim.Optimizer, total_batches: int) -> torch.optim.lr_scheduler.CosineAnnealingLR:
+        """Build learning rate scheduler from config"""
+        sched = self.config['lr_scheduler']
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer,
+            T_max=total_batches,
+            eta_min=sched['eta_min'],
+            last_epoch=-1
+        )
+
+    def build_trainer(self, model, optimizer, lr_schedule, dataset, exp_dir: Path):
+        """Build trainer instance from config"""
+        return trainer(
+            model=model,
+            optimizer=optimizer,
+            lr_schudule=lr_schedule,
+            dataset=dataset,
+            epoch=self.config['training']['epoch'],
+            batch_size=self.config['training']['batch_size'],
+            device=self.config['device'],
+            exp_name=self.config['exp_name'],
+            exp_dir=str(exp_dir),
+            config=self.config
+        )
 
 def save_checkpoint(
     model: torch.nn.Module,
@@ -72,11 +194,11 @@ def load_checkpoint(
     return dic["iterations"]
 
 class trainer():
-    def __init__(self, model, 
-                 optimizer:AdamW, lr_schudule:torch.optim.lr_scheduler.CosineAnnealingLR, 
-                 dataset:plain_dataset, epoch:int, batch_size:int, 
-                 device):
-        
+    def __init__(self, model,
+                 optimizer:AdamW, lr_schudule:torch.optim.lr_scheduler.CosineAnnealingLR,
+                 dataset:plain_dataset, epoch:int, batch_size:int,
+                 device, exp_name:str, exp_dir:str, config:dict):
+
         self.model = model
         self.optimizer = optimizer
         self.lr_schudule = lr_schudule
@@ -84,13 +206,15 @@ class trainer():
         self.epoch = epoch
         self.batch_size = batch_size
         self.device = device
+        self.exp_name = exp_name
+        self.exp_dir = Path(exp_dir)
+        self.config = config
 
         self.iterations = 0
         self.steps = 0
 
-        # TensorBoard setup
-        run_name = f"exp_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-        self.writer = SummaryWriter(f"runs/{run_name}")
+        # TensorBoard setup - use exp_dir for unified naming
+        self.writer = SummaryWriter(str(self.exp_dir))
         self.grad_clip = grad_clip(max_l2_norm=1)
 
         # For throughput tracking
@@ -144,156 +268,57 @@ class trainer():
     def test(self):
         pass
 
-def training_together():
-    vocab_size:int = 32000
-    context_length:int = 128
-    num_layers:int = 6
-    d_model: int = 512
-    num_heads: int = 8
-    d_ff: int = 2048
-    rope_theta: float = 10000.0
+def training_together(config_path: str = "configs/config.json"):
+    """
+    Config-driven training function.
 
-    epoch = 4
-    batch_size = 32
-    device = "cuda"
+    Args:
+        config_path: Path to config JSON file
+    """
+    # Load config and setup
+    builder_ins = builder(config_path)
+    set_random_seed(builder_ins.config['seed'])
 
-    # psedo_data = torch.randint(0,vocab_size,(10000,))
-    data_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy"
-    data = np.memmap(data_path,dtype=np.int32)
-    plain_dataset_ins = plain_dataset(data,
-                                      batch_size,
-                                      context_length,
-                                      device)
+    # Setup experiment directory
+    exp_dir = builder_ins.setup_experiment_dir()
+    print(f"Experiment directory: {exp_dir}")
 
-    tokens_per_batch = batch_size * context_length
-    total_tokens = plain_dataset_ins.__len__()
-    total_batches = total_tokens // tokens_per_batch * epoch
+    # Build all components
+    model = builder_ins.build_model()
+    dataset = builder_ins.build_dataset()
+    optimizer = builder_ins.build_optimizer(model)
+    total_batches = builder_ins.calculate_total_batches()
+    lr_schedule = builder_ins.build_lr_schedule(optimizer, total_batches)
+    trainer_ins = builder_ins.build_trainer(model, optimizer, lr_schedule, dataset, exp_dir)
 
-    model = transformer_lm(
-        vocab_size,
-        context_length,
-        num_layers,
-        d_model,
-        num_heads,
-        d_ff,
-        rope_theta,
-        device
-    )
-    
-    optimizer = torch.optim.AdamW(params=model.parameters(recurse=True))
-    lr_schedule = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=total_batches,
-                eta_min=6e-5,
-                last_epoch=-1)
+    print(f"Total batches: {total_batches}")
+    print(f"Starting training for {builder_ins.config['training']['epoch']} epochs...")
 
-    trainer_ins = trainer(model=model, 
-                          optimizer=optimizer,
-                          lr_schudule=lr_schedule,
-                          dataset=plain_dataset_ins, 
-                          epoch=epoch, 
-                          batch_size=batch_size,
-                          device=device)
-
-    
+    # Training loop
+    save_every_n = builder_ins.config['checkpoint']['save_every_n_steps']
     for batch_index in tqdm(range(total_batches)):
         trainer_ins.train_batch()
-        
-        if batch_index % 1000 == 0:
-                save_checkpoint(
-                    model = model,
-                    optimizer=optimizer,
-                    iteration=batch_index,
-                    out=f"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/weights/1016/step_{batch_index}.pt"
-                )
-    
+
+        if batch_index % save_every_n == 0 and batch_index > 0:
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                iteration=batch_index,
+                out=exp_dir / f"step_{batch_index}.pt"
+            )
+
+            if batch_index == 100:
+                break
+
+    # Final checkpoint and cleanup
     trainer_ins.writer.close()
     save_checkpoint(
-        model = model,
-        optimizer=optimizer,
-        iteration=batch_index,
-        out=f"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/weights/1016/step_{batch_index}.pt"
-    )
-
-def debug_1016():
-    vocab_size:int = 32000
-    context_length:int = 128
-    num_layers:int = 6
-    d_model: int = 512
-    num_heads: int = 8
-    d_ff: int = 2048
-    rope_theta: float = 10000.0
-
-    epoch = 1
-    batch_size = 32
-    device = "cuda"
-
-    # psedo_data = torch.randint(0,vocab_size,(10000,))
-    data_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy"
-    data = np.memmap(data_path,dtype=np.int32)
-    plain_dataset_ins = plain_dataset(data,
-                                      batch_size,
-                                      context_length,
-                                      device)
-
-    tokens_per_batch = batch_size * context_length
-    total_tokens = plain_dataset_ins.__len__()
-    total_batches = total_tokens // tokens_per_batch * epoch
-
-    model = transformer_lm(
-        vocab_size,
-        context_length,
-        num_layers,
-        d_model,
-        num_heads,
-        d_ff,
-        rope_theta,
-        device
-    )
-
-    # optimizer = AdamW(model.parameters(recurse=True),flag_lr_schedule=True,
-    #                 warmup_iters=int(total_batches*0.05),
-    #                 cosine_cycle_iters=total_batches)
-    
-    optimizer = torch.optim.AdamW(
-        params=model.parameters(recurse=True),
-    )
-
-    lr_schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
-                T_max=total_batches,
-                eta_min=6e-5,
-                last_epoch=-1)
-
-    trainer_ins = trainer(model=model, 
-                          optimizer=optimizer,
-                          dataset=plain_dataset_ins, 
-                          epoch=epoch, 
-                          batch_size=batch_size,
-                          device=device)
-    
-    ckp_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/weights/1014/step_41000.pt"
-    
-    iteration = load_checkpoint(ckp_path,model=model,optimizer=optimizer)
-    for batch_index in tqdm(range(iteration, total_batches)):
-        loss = trainer_ins.train_batch()
-        iteration += 1
-        # print(loss)
-        if batch_index % 1000 == 0:
-                save_checkpoint(
-                    model = model,
-                    optimizer=optimizer,
-                    iteration=total_batches,
-                    out=f"/mnt/aat/z zhao.zhou/cs336_2025/assignment1-basics/weights/1016/step_{iteration}.pt"
-                )
-    
-    trainer_ins.writer.close()
-    save_checkpoint(
-        model = model,
+        model=model,
         optimizer=optimizer,
         iteration=total_batches,
-        out=f"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/weights/1016/step_{iteration}.pt"
+        out=exp_dir / f"step_{total_batches}.pt"
     )
+    print(f"Training complete. Final checkpoint saved to {exp_dir / f'step_{total_batches}.pt'}")
 
 if __name__ == "__main__":
-    set_random_seed(seed=42)
     training_together()
