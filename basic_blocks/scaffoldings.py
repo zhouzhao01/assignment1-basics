@@ -307,8 +307,8 @@ def training_together(config_path: str = "configs/config.json"):
                 out=exp_dir / f"step_{batch_index}.pt"
             )
 
-            if batch_index == 100:
-                break
+        # if batch_index == 100:
+        #     break
 
     # Final checkpoint and cleanup
     trainer_ins.writer.close()
