@@ -1,6 +1,11 @@
 import torch
 import numpy.typing as npt
 
+import math
+from collections import Counter
+import numpy as np
+import pytest
+
 class plain_dataset():
     def __init__(self, dataset: npt.NDArray, batch_size: int, context_length: int, device: str):
         self.dataset = dataset
@@ -14,9 +19,9 @@ class plain_dataset():
     def get_batch(self):
         """
         Returns:
-            Tuple of torch.LongTensors of shape (batch_size, context_length). The first tuple item
-            is the sampled input sequences, and the second tuple item is the corresponding
-            language modeling labels.
+            Tuple of torch.LongTensors of shape (batch_size, context_length). 
+            The first tuple item is the sampled input sequences, 
+            and the second tuple item is the corresponding language modeling labels.
         """
         valid_sample_num = self.__len__() - self.context_length
 
@@ -31,12 +36,6 @@ class plain_dataset():
             target[sample_index,:] = torch.tensor(self.dataset[start+1:end+1])
 
         return input_seq.to(self.device), target.to(self.device)
-
-import math
-from collections import Counter
-
-import numpy as np
-import pytest
 
 def test_get_batch():
     dataset = np.arange(0, 100)
@@ -102,8 +101,6 @@ def test_get_batch():
         )
         assert "CUDA error" in str(excinfo.value) or "Torch not compiled with CUDA enabled" in str(excinfo.value)
 
-def get_one_raw_sample(src_)
-
 def run_get_batch(
     dataset: npt.NDArray, batch_size: int, context_length: int, device: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -127,6 +124,21 @@ def run_get_batch(
     dataset = plain_dataset(dataset,batch_size,context_length,device)
     return dataset.get_batch()
 
+def test_real_data():
+    from tokenizers import Tokenizer
+    from tokenizers.models import BPE
+    owt_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_owt.json")
+
+    data_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy"
+    data = np.memmap(data_path,dtype=np.int32)
+    plain_dataset_ins = plain_dataset(data,
+                                      batch_size=10,
+                                      context_length=50,
+                                      device='cpu')
+    for _ in range(10):
+        input_seq, target_seq = plain_dataset_ins.get_batch()
+        print(owt_tokenizer.decode(input_seq[0].tolist()).replace("Ġ"," "))
 
 if __name__ == "__main__":
-    test_get_batch()
+    # test_get_batch()
+    test_real_data()

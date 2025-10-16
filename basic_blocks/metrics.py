@@ -8,6 +8,7 @@ class cross_entropy_loss(nn.Module):
     def __init__(self):
         super().__init__()
 
+
     def forward(self,
                 inputs: Float[torch.Tensor, " ... vocab_size"], 
                 targets: Int[torch.Tensor, " ..."]):

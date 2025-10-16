@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 
 class Linear(nn.Module):
     def __init__(self, d_in, d_out, device=None, dtype=None):
@@ -11,7 +12,7 @@ class Linear(nn.Module):
             data = torch.empty(d_out,d_in,device=device,dtype=dtype),
                                    requires_grad=True)
         
-        torch.nn.init.trunc_normal_(self.W)
+        torch.nn.init.trunc_normal_(self.W, mean=0.0, std=1.0/math.sqrt(d_in))
        
 
     def forward(self, in_features:torch.Tensor) -> torch.Tensor:
@@ -26,7 +27,7 @@ class Embedding(nn.Module):
             requires_grad=True
         )
 
-        nn.init.trunc_normal_(self.weights)
+        nn.init.trunc_normal_(self.weights, mean=0.0, std=1.0/math.sqrt(embedding_dim))
 
     def forward(self,tokens_ids: torch.Tensor) -> torch.Tensor:
         return self.weights[tokens_ids]
@@ -88,9 +89,9 @@ class SwiGLU(nn.Module):
         self.linear_2 = nn.Parameter(torch.empty(self.dim_model,  self.dff      ,device=device))
         self.linear_3 = nn.Parameter(torch.empty(self.dff,        self.dim_model,device=device))
 
-        torch.nn.init.trunc_normal_(self.linear_1)
-        torch.nn.init.trunc_normal_(self.linear_2)
-        torch.nn.init.trunc_normal_(self.linear_3)
+        torch.nn.init.trunc_normal_(self.linear_1, mean=0.0, std=1.0/math.sqrt(self.dim_model))
+        torch.nn.init.trunc_normal_(self.linear_2, mean=0.0, std=1.0/math.sqrt(self.dff))
+        torch.nn.init.trunc_normal_(self.linear_3, mean=0.0, std=1.0/math.sqrt(self.dim_model))
 
         self.SiLU = SiLU()
 
@@ -165,10 +166,24 @@ class RoPE(nn.Module):
         # Current approach: Loop through positions and apply matrix multiplication
         # x = x.to(self.device)
         # breakpoint()
+
+        # Debug assertions
+        max_pos = token_position.max().item()
+        assert max_pos < self.rotation_matrix.shape[0], \
+            f"RoPE Error: position {max_pos} exceeds rotation_matrix size {self.rotation_matrix.shape[0]}. " \
+            f"x.shape={x.shape}, token_position range=[{token_position.min().item()}, {max_pos}]"
+
+        # Check for NaN/Inf in input
+        if torch.isnan(x).any():
+            raise ValueError(f"RoPE: NaN detected in input x! Shape: {x.shape}")
+        if torch.isinf(x).any():
+            raise ValueError(f"RoPE: Inf detected in input x! Shape: {x.shape}")
+
         for position in token_position:
             """
             Be careful. It should be x * R.T.
             """
+            position = position.item()
             x[...,position,:] =   x[...,position,:]  @ self.rotation_matrix[position,...].T
 
         # TODO: OPTIMIZATION STEP 4 - Optimized forward pass
@@ -232,13 +247,14 @@ class multihead_self_attention(nn.Module):
         self.W_V = nn.Parameter(torch.empty(num_heads * self.d_v, d_model, device=device))
         self.W_O = nn.Parameter(torch.empty(d_model, num_heads * self.d_v, device=device))
 
-        torch.nn.init.trunc_normal_(self.W_Q)
-        torch.nn.init.trunc_normal_(self.W_K)
-        torch.nn.init.trunc_normal_(self.W_V)
-        torch.nn.init.trunc_normal_(self.W_O)
+        torch.nn.init.trunc_normal_(self.W_Q, mean=0.0, std=1.0/math.sqrt(d_model))
+        torch.nn.init.trunc_normal_(self.W_K, mean=0.0, std=1.0/math.sqrt(d_model))
+        torch.nn.init.trunc_normal_(self.W_V, mean=0.0, std=1.0/math.sqrt(d_model))
+        torch.nn.init.trunc_normal_(self.W_O, mean=0.0, std=1.0/math.sqrt(num_heads * self.d_v))
 
         self.SDPA = scaled_dot_product_attention(self.d_k,self.d_v, device=device)
         
+        self.max_seq_len = max_seq_len
         if theta and max_seq_len:
             self.RoPE = RoPE(theta=theta,d_k=self.d_k,max_seq_len=max_seq_len,device=device)
 
@@ -247,12 +263,31 @@ class multihead_self_attention(nn.Module):
         in_features (Float[Tensor, "... sequence_length d_in"]): Tensor to run your implementation on.
         """
         batch_size = in_features.shape[0]
-        d_in = in_features.shape[-1] 
-        sequence_length = in_features.shape[-2] 
+        d_in = in_features.shape[-1]
+        sequence_length = in_features.shape[-2]
+
+        # Check for NaN/Inf in input features
+        if torch.isnan(in_features).any():
+            raise ValueError(f"MHSA: NaN detected in in_features! Shape: {in_features.shape}")
+        if torch.isinf(in_features).any():
+            raise ValueError(f"MHSA: Inf detected in in_features! Shape: {in_features.shape}")
+
+        if self.max_seq_len and (sequence_length > self.max_seq_len):
+            print(f"  sequence_length: {sequence_length}")
+            print(f"  in_features.shape: {in_features.shape}")
+            print(f"  Expected: {self.max_seq_len}")
+            raise ValueError(f"Unexpected sequence_length: {sequence_length}")
+
 
         W_Q_in = torch.einsum("k d, ... s d -> ... s k", self.W_Q, in_features)
         W_K_in = torch.einsum("k d, ... s d -> ... s k", self.W_K, in_features)
         W_V_in = torch.einsum("v d, ... s d -> ... s v", self.W_V, in_features)
+
+        # Check for NaN/Inf after projections
+        if torch.isnan(W_Q_in).any() or torch.isinf(W_Q_in).any():
+            raise ValueError(f"MHSA: NaN/Inf in W_Q_in after projection!")
+        if torch.isnan(W_K_in).any() or torch.isinf(W_K_in).any():
+            raise ValueError(f"MHSA: NaN/Inf in W_K_in after projection!")
 
         # Apply RoPE to Query and Key
         if flag_RoPE:
@@ -645,12 +680,12 @@ if __name__ == "__main__":
     # test_transformer_lm()
 
     # Model configuration
-    vocab_size = 50257
-    context_length = 1024
+    vocab_size = 32000
+    context_length = 128
     num_layers = 48
-    d_model = 1600
-    num_heads = 25
-    d_ff = 1600
+    d_model = 512
+    num_heads = 8
+    d_ff = 2048
 
     # Create model
     model = transformer_lm(
