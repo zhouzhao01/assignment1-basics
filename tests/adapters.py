@@ -15,6 +15,8 @@ import basic_blocks.metrics as custom_loss
 
 import basic_blocks.optimizer as custom_optimizer
 
+import basic_blocks.dataset as custom_dataset
+
 def run_linear(
     d_in: int,
     d_out: int,
