@@ -1,4 +1,8 @@
 {
+    "exp_name": "transformer_lm_6layer_512d",
+    "seed": 42,
+    "device": "cuda",
+
     "model": {
         "vocab_size": 32000,
         "context_length": 128,
@@ -8,20 +12,31 @@
         "d_ff": 2048,
         "rope_theta": 10000.0
     },
-    "training":{
-        "epoch": 4,
-        "batch_size": 32,
-        "optimizer":"custom:AdamW",
-        "lr_scheduler": null
+
+    "training": {
+        "epoch": 1,
+        "batch_size": 8
     },
 
-    "data":{
-        "train_dataset":"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy",
-        "valid_dataset":"None"
+    "optimizer": {
+        "type": "AdamW",
+        "lr": 3e-4,
+        "betas": [0.9, 0.999],
+        "weight_decay": 0.01,
+        "eps": 1e-8
     },
 
-    "checkpoint":{
-        "save_dir": "weights/",
+    "lr_scheduler": {
+        "type": "CosineAnnealingLR",
+        "eta_min": 6e-5
+    },
+
+    "data": {
+        "train_dataset": "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy"
+    },
+
+    "checkpoint": {
+        "save_dir": "runs",
         "save_every_n_steps": 1000,
         "keep_last_n": 3
     }
