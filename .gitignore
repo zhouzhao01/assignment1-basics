@@ -162,4 +162,9 @@ cython_debug/
 .ruff_cache/
 *.zip
 
-data
+data/
+
+# Training artifacts
+weights/
+wandb/
+runs/
