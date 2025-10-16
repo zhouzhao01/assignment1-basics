@@ -3,6 +3,8 @@ import random
 import pickle
 from pathlib import Path
 from typing import List, Optional
+from tqdm import tqdm
+import numpy as np
 
 
 def build_document_index(file_path: str, delimiter: str = "<|endoftext|>") -> List[int]:
@@ -164,6 +166,72 @@ def random_sample_documents(
 
     return documents
 
+def tokenize_dataset(
+    file_path: str,
+    output_path: str,
+    batch_size: int,
+    tokenizer,
+    delimiter: str = "<|endoftext|>",
+    use_cache: bool = True,
+) -> List[str]:
+    """
+    Tokenize entire dataset in single pass
+
+    Args:
+        file_path: Path to the text file
+        num_samples: Number of documents to sample
+        delimiter: Document separator token (default: "<|endoftext|>")
+        use_cache: Whether to use cached document index (default: True)
+        seed: Random seed for reproducible sampling
+
+    Returns:
+        List of sampled document strings
+
+    Raises:
+        ValueError: If num_samples > number of available documents
+        FileNotFoundError: If file_path doesn't exist
+    """
+    # Try to load cached index first
+    index = None
+    if use_cache:
+        index = _load_cached_index(file_path)
+
+    # Build index if not cached or cache disabled
+    if index is None:
+        index = build_document_index(file_path, delimiter)
+        if use_cache:
+            _save_index_cache(file_path, index)
+
+    total_docs = len(index)
+
+    eos_token_id = tokenizer.token_to_id("<|endoftext|>")
+
+    
+    all_tokens = []
+    for start_idx in tqdm(range(0, total_docs, batch_size), desc="Tokenizing"):
+        end_idx = min(start_idx + batch_size, total_docs)
+
+        # Read batch of documents
+        doc_batch = [read_document_at_position(file_path, index[i],  "<|endoftext|>")
+                     for i in range(start_idx, end_idx)]
+        
+        # Tokenize batch 
+        encodings = tokenizer.encode_batch(doc_batch)
+
+        # Append tokens
+        for enc in encodings:
+            all_tokens.extend(enc.ids)
+            all_tokens.append(eos_token_id)
+        
+    # Convert to array and save
+    print(f"Converting {len(all_tokens):,} tokens to numpy array...")
+    token_array = np.array(all_tokens, dtype=np.int32)
+    print(f"Saving to {output_path}...")
+    np.save(output_path, token_array)
+
+    print(f"Done! Saved {token_array.shape[0]:,} tokens")
+    return token_array.shape[0]
+
 
 def get_document_count(file_path: str, delimiter: str = "<|endoftext|>", use_cache: bool = True) -> int:
     """
@@ -189,3 +257,16 @@ def get_document_count(file_path: str, delimiter: str = "<|endoftext|>", use_cac
             _save_index_cache(file_path, index)
 
     return len(index)
+
+if __name__ == "__main__":
+    from tokenizers import Tokenizer
+    from tokenizers.models import BPE
+
+    owt_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_owt.json")
+
+    tokenize_dataset(
+        file_path="/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid.txt",
+        batch_size=2048,
+        tokenizer=owt_tokenizer,
+        output_path="/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy",
+    )

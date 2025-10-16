@@ -25,6 +25,10 @@ dependencies = [
     "matplot>=0.1.9",
     "tokenizers>=0.22.1",
     "torchtext>=0.17.2",
+    "pandas>=2.3.3",
+    "tensorboard>=2.20.0",
+    "transformers>=4.57.0",
+    "weave>=0.52.9",
 ]
 
 [build-system]

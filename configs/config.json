@@ -1,0 +1,28 @@
+{
+    "model": {
+        "vocab_size": 32000,
+        "context_length": 128,
+        "num_layers": 6,
+        "d_model": 512,
+        "num_heads": 8,
+        "d_ff": 2048,
+        "rope_theta": 10000.0
+    },
+    "training":{
+        "epoch": 4,
+        "batch_size": 32,
+        "optimizer":"custom:AdamW",
+        "lr_scheduler": null
+    },
+
+    "data":{
+        "train_dataset":"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy",
+        "valid_dataset":"None"
+    },
+
+    "checkpoint":{
+        "save_dir": "weights/",
+        "save_every_n_steps": 1000,
+        "keep_last_n": 3
+    }
+}

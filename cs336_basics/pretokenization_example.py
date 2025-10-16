@@ -50,7 +50,9 @@ def find_chunk_boundaries(
 
 
 ## Usage
-with open(..., "rb") as f:
+
+data_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+with open(data_path, "rb") as f:
     num_processes = 4
     boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
@@ -60,3 +62,4 @@ with open(..., "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
         # Run pre-tokenization on your chunk and store the counts for each pre-token
+        # if f.read(end - start)
