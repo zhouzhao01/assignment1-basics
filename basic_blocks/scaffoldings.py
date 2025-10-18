@@ -1,5 +1,7 @@
 import torch
 import os
+import subprocess
+
 from typing import IO, Any, BinaryIO
 import json
 from pathlib import Path
@@ -23,6 +25,8 @@ import wandb
 
 from tqdm import tqdm
 
+import yaml
+
 def set_random_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -35,6 +39,8 @@ class builder():
     """
     def __init__(self, config_path: str):
         """Read from config path, load and validate required fields exist"""
+        if config_path is None:
+            config_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/configs/config_4090.json"
         self.config_path = config_path
         self.config = self._load_config(config_path)
         self._validate_required_fields()
@@ -171,7 +177,8 @@ class builder():
             )
         return lr_scheduler
 
-    def build_trainer(self, model, optimizer, lr_schedule, train_dataloader, valid_dataloader, exp_dir: Path):
+    def build_trainer(self, model, optimizer, lr_schedule, train_dataloader, valid_dataloader, exp_dir: Path, 
+                      wandb_runs:wandb.Run):
         """Build trainer instance from config"""
         return trainer(
             model=model,
@@ -184,7 +191,8 @@ class builder():
             device=self.config['device'],
             exp_name=self.config['exp_name'],
             exp_dir=str(exp_dir),
-            config=self.config
+            config=self.config,
+            wandb_runs=wandb_runs
         )
 
 def save_checkpoint(
@@ -240,7 +248,9 @@ class trainer():
                 optimizer:AdamW, lr_schedule:torch.optim.lr_scheduler.CosineAnnealingLR,
                 train_dataloader:DataLoader, epoch:int, batch_size:int,
                 valid_dataloader:DataLoader,
-                device, exp_name:str, exp_dir:str, config:dict):
+                device, exp_name:str, exp_dir:str, config:dict,
+                wandb_runs: wandb.Run
+                ):
 
         self.model = model
         self.optimizer = optimizer
@@ -263,10 +273,7 @@ class trainer():
 
         # TensorBoard setup - use exp_dir for unified naming
         # self.writer = SummaryWriter(str(self.exp_dir))
-        self.wandb_logger = wandb.init(
-            project= "assignment1",
-            config=config
-        )
+        self.wandb_logger = wandb_runs
 
         self.grad_clip = grad_clip(max_l2_norm=1)
 
@@ -345,18 +352,35 @@ class trainer():
         loss = self.loss_fun(rlt, targets)
         return loss
 
-    def test(self):
-        pass
 
-def training_together(config_path: str):
+def training_together(config_path:str=None):
     """
     Config-driven training function.
 
     Args:
         config_path: Path to config JSON file
     """
+
+    with open("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/sweep_config.yaml") as file:
+        config = yaml.load(file, Loader=yaml.FullLoader)
+        
+    wandb_runs = wandb.init(config=config)
+
     # Load config and setup
     builder_ins = builder(config_path)
+
+    # wandb sweep hyperparameter fetch
+    builder_ins.config["training"]["batch_size"] = wandb_runs.config["batch_size"]
+
+    builder_ins.config["lr_scheduler"]["max_learning_rate"] = wandb_runs.config["max_learning_rate"]
+    builder_ins.config["lr_scheduler"]["min_learning_rate"] = wandb_runs.config["max_learning_rate"] * wandb_runs.config["min_lr_ratio"]
+    builder_ins.config["lr_scheduler"]["warmup_iters"] = wandb_runs.config["warmup_iters"]
+    
+    builder_ins.config["optimizer"]["weight_decay"] = wandb_runs.config["weight_decay"]
+
+    # print(f"builder_ins.config: {builder_ins.config}")
+    # builder_ins.config["optimizer"]["betas"] = wandb_runs.config["weight_decay"]
+
     set_random_seed(builder_ins.config['seed'])
     # Setup experiment directory
     exp_dir = builder_ins.setup_experiment_dir()
@@ -364,10 +388,6 @@ def training_together(config_path: str):
 
     # Build all components
     model = builder_ins.build_model()
-    # Ensure model is on GPU and in training mode
-    model = model.to(builder_ins.config['device'])
-    model.train()
-
     train_dataset = builder_ins.build_torch_dataset(data_split="train")
     train_loader = DataLoader(
             train_dataset,
@@ -376,51 +396,54 @@ def training_together(config_path: str):
             num_workers=4,  # KEY: parallel data loading
             pin_memory=True,  # faster CPU->GPU transfer
             persistent_workers=True  # keep workers alive between epochs
-        )
-    
+    )
     valid_dataset = builder_ins.build_torch_dataset(data_split="valid")
     valid_loader = DataLoader(
             valid_dataset,
             batch_size=builder_ins.config["training"]["batch_size"],
             shuffle=True,
-            num_workers=0,  # KEY: parallel data loading
+            num_workers=4,  # KEY: parallel data loading
             pin_memory=True,  # faster CPU->GPU transfer
-            persistent_workers=False  # keep workers alive between epochs
-        )
-
-
+            persistent_workers=True  # keep workers alive between epochs
+    )
     optimizer = builder_ins.build_optimizer(model)
     total_batches = builder_ins.calculate_total_batches()
     lr_schedule = builder_ins.build_lr_schedule(optimizer, total_batches)
-    trainer_ins = builder_ins.build_trainer(model, optimizer, lr_schedule, train_loader, valid_loader, exp_dir)
+    trainer_ins = builder_ins.build_trainer(model, optimizer, lr_schedule, train_loader, valid_loader, exp_dir, wandb_runs)
 
     print(f"Total training batches: {total_batches}")
     print(f"Starting training for {builder_ins.config['training']['epoch']} epochs...")
 
-    # Training loop
+    # Training Loop
+    best_loss = None
     save_every_n = builder_ins.config['checkpoint']['save_every_n_steps']
-
     trainer_ins.wandb_logger.watch(model, trainer_ins.loss_fun)
-
+    model = model.to(builder_ins.config['device'])
     for epoch in range(builder_ins.config['training']['epoch']):
         train_dataloader_iter = iter(train_loader)
         
         for _ in tqdm(range(total_batches), desc=f"Epoch {epoch+1}"):
             # Train Model
+            model.train()
             input_sequence, targets = next(train_dataloader_iter)
             trainer_ins.train_batch(input_sequence, targets)
 
             # Valid Model
             # trainer_ins.valid()
             if trainer_ins.steps % save_every_n == 0 and trainer_ins.steps > 0:
-                trainer_ins.valid()
+                loss = trainer_ins.valid()
 
-                save_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    iteration=trainer_ins.steps,
-                    out=exp_dir / f"step_{trainer_ins.steps}.pt"
-                )
+                if best_loss == None:
+                    best_loss = loss
+
+                elif loss < best_loss:
+                    save_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        iteration=trainer_ins.steps,
+                        out=exp_dir / f"best.pt"
+                    )
+                    best_loss = loss
 
     # Final checkpoint and cleanup
     # trainer_ins.writer.close()
@@ -431,6 +454,42 @@ def training_together(config_path: str):
         out=exp_dir / f"step_{total_batches}.pt"
     )
     print(f"Training complete. Final checkpoint saved to {exp_dir / f'step_{total_batches}.pt'}")
+    trainer_ins.wandb_logger.finish()
 
 if __name__ == "__main__":
+    # sweep_configuration = {
+    #     "method": "random",
+    #     "name": "assignment1-optimizer-lr",
+    #     "description": "sweep optimizer and batchsize hyperparameters",
+    #     "metric": {
+    #         "goal": "minimize", 
+    #         "name": "Loss/train"
+    #     },
+    #     "parameters": {
+    #         "batch_size": {
+    #             "values": [1, 16, 32, 64, 128, 256]
+    #         },
+
+    #         "max_learning_rate": {
+    #             "values": [1e-4, 3e-4, 5e-4, 1e-3]
+    #         },
+    #         "min_lr_ratio": {
+    #             "values": [0.01, 0.05, 0.1]
+    #         },
+    #         "warmup_iters": {
+    #             "values": [500, 1000, 2000, 3000, 4000, 5000]
+    #         },
+    #         "weight_decay": {
+    #             "values": [0.0, 0.01, 0.1]
+    #         },
+    #     }
+    # }
+
+    # # Create sweep
+    # sweep_id = wandb.sweep(
+    #     sweep_configuration, 
+    #     project="assignment1",
+    #     entity="push-seminar-4l-hong-kong-university-of-science-and-tech"  # or your entity name
+    # )
+
     training_together("configs/config_4090.json")

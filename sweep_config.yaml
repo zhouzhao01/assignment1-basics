@@ -1,0 +1,18 @@
+program: basic_blocks/scaffoldings.py
+method: random
+name: assignment1-optimizer-lr
+description: sweep optimizer and batchsize hyperparameters
+metric:
+  goal: minimize
+  name: Loss/train
+parameters:
+  batch_size:
+    values: [1, 16, 32, 64, 128, 256]
+  max_learning_rate:
+    values: [1e-4, 3e-4, 5e-4, 1e-3]
+  min_lr_ratio:
+    values: [0.01, 0.05, 0.1]
+  warmup_iters:
+    values: [500, 1000, 2000, 3000, 4000, 5000]
+  weight_decay:
+    values: [0.0, 0.01, 0.1]
