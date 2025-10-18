@@ -5,7 +5,7 @@ This script benchmarks each stage of the MHA forward pass to identify bottleneck
 
 import torch
 import time
-from basic_blocks.basic_blocks import multihead_self_attention, multihead_self_attention_fast
+from basic_blocks.models import multihead_self_attention, multihead_self_attention_fast
 
 def profile_custom_mha(batch_size=8, seq_len=256, d_model=512, num_heads=16, num_iters=100, use_rope=True):
     """Profile custom MHA implementation with detailed timing"""

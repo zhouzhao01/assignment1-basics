@@ -293,12 +293,12 @@ if __name__ == "__main__":
     #     output_path="data/owt_train.npy",
     # )
 
-    tokenize_dataset(
-        file_path="data/TinyStoriesV2-GPT4-train.txt",
-        batch_size=2048,
-        tokenizer=tiny_tokenizer,
-        output_path="data/TinyStoriesV2-GPT4-train_tinyTokenizer_10000.npy",
-    )
+    # tokenize_dataset(
+    #     file_path="data/TinyStoriesV2-GPT4-train.txt",
+    #     batch_size=2048,
+    #     tokenizer=tiny_tokenizer,
+    #     output_path="data/TinyStoriesV2-GPT4-train_tinyTokenizer_10000.npy",
+    # )
 
     tokenize_dataset(
         file_path="data/TinyStoriesV2-GPT4-valid.txt",

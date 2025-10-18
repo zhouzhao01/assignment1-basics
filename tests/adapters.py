@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from torch import nn
 
-import basic_blocks.basic_blocks as custom_basic_blocks 
+import basic_blocks.models as custom_basic_blocks 
 import basic_blocks.metrics as custom_loss
 
 import basic_blocks.optimizer as custom_optimizer

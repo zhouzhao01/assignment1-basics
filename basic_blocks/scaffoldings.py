@@ -5,15 +5,14 @@ import json
 from pathlib import Path
 
 from dataset import plain_dataset
-from dataset import word_dataset
+from dataset import TokenDataset
 from torch.utils.data import DataLoader
 
 from metrics import cross_entropy_loss
-from basic_blocks import transformer_lm
 
-from optimizer import AdamW
-from optimizer import grad_clip
+from optimizer import AdamW, grad_clip, lr_cosine_schedule
 
+from models import transformer_lm
 
 import numpy as np
 
@@ -85,8 +84,8 @@ class builder():
         epoch = self.config['training']['epoch']
 
         tokens_per_batch = batch_size * context_length
-        batches_per_epoch = dataset_size // tokens_per_batch
-        return batches_per_epoch * epoch
+        batches_per_epoch = dataset_size // tokens_per_batch * epoch
+        return batches_per_epoch 
 
     def build_model(self) -> transformer_lm:
         """Build transformer model from config"""
@@ -115,44 +114,71 @@ class builder():
             device=self.config['device']
         )
     
-    def build_torch_dataset(self) -> word_dataset:
-        data_path = self.config['data']['train_dataset']
-        data = np.memmap(data_path, dtype=np.int32, mode='r')
-
-        return word_dataset(
-            dataset=data,
-            # batch_size=self.config['training']['batch_size'],
+    def build_torch_dataset(self, data_split: str) -> TokenDataset:
+        """
+        Build a torch dataset.
+            data_split: str. Choose from ["train", "valid"].
+        """
+        data_path = self.config['data'][f'{data_split}_dataset']
+        # data = np.memmap(data_path, dtype=np.int32, mode='r')
+        data = np.load(file=data_path,mmap_mode='r')
+        return TokenDataset(
+            tokens=data,
             context_length=self.config['model']['context_length'],
         )
 
     def build_optimizer(self, model: torch.nn.Module) -> torch.optim.AdamW:
         """Build AdamW optimizer from config"""
         opt = self.config['optimizer']
-        return torch.optim.AdamW(
-            params=model.parameters(),
-            lr=opt['lr'],
-            betas=tuple(opt['betas']),
-            eps=opt['eps'],
-            weight_decay=opt['weight_decay']
-        )
-
+        if opt["type"] == "custom_AdamW":
+            optimizer = AdamW(
+                params=model.parameters(),
+                lr=opt['lr'],
+                betas=tuple(opt['betas']),
+                weight_decay=opt['weight_decay'],
+                eps=opt['eps']
+                )
+        else:
+            optimizer = torch.optim.AdamW(
+                params=model.parameters(),
+                lr=opt['lr'],
+                betas=tuple(opt['betas']),
+                eps=opt['eps'],
+                weight_decay=opt['weight_decay']
+            )
+        return optimizer
+    
     def build_lr_schedule(self, optimizer: torch.optim.Optimizer, total_batches: int) -> torch.optim.lr_scheduler.CosineAnnealingLR:
         """Build learning rate scheduler from config"""
         sched = self.config['lr_scheduler']
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer=optimizer,
-            T_max=total_batches,
-            eta_min=sched['eta_min'],
-            last_epoch=-1
-        )
+        if sched["type"] == "custom_CosineAnnealingLR":
+            total_batches = self.calculate_total_batches() * self.config["training"]["epoch"]
+            warmup_iters= sched["warmup_iters"]
+            cosine_cycle_iters = total_batches - warmup_iters
+            lr_scheduler = lr_cosine_schedule(
+                optimizer=optimizer,
+                max_learning_rate=sched["max_learning_rate"],
+                min_learning_rate=sched["min_learning_rate"],
+                warmup_iters= warmup_iters,
+                cosine_cycle_iters= cosine_cycle_iters
+            )
+        else:
+            lr_scheduler =  torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer=optimizer,
+                T_max=total_batches,
+                eta_min=sched['min_learning_rate'],
+                last_epoch=-1
+            )
+        return lr_scheduler
 
-    def build_trainer(self, model, optimizer, lr_schedule, dataloader, exp_dir: Path):
+    def build_trainer(self, model, optimizer, lr_schedule, train_dataloader, valid_dataloader, exp_dir: Path):
         """Build trainer instance from config"""
         return trainer(
             model=model,
             optimizer=optimizer,
             lr_schedule=lr_schedule,
-            dataloader=dataloader,
+            train_dataloader=train_dataloader,
+            valid_dataloader=valid_dataloader,
             epoch=self.config['training']['epoch'],
             batch_size=self.config['training']['batch_size'],
             device=self.config['device'],
@@ -210,17 +236,22 @@ def load_checkpoint(
     return dic["iterations"]
 
 class trainer():
-    def __init__(self, model,
-                 optimizer:AdamW, lr_schedule:torch.optim.lr_scheduler.CosineAnnealingLR,
-                 dataloader:DataLoader, epoch:int, batch_size:int,
-                 device, exp_name:str, exp_dir:str, config:dict):
+    def __init__(self, model:transformer_lm,
+                optimizer:AdamW, lr_schedule:torch.optim.lr_scheduler.CosineAnnealingLR,
+                train_dataloader:DataLoader, epoch:int, batch_size:int,
+                valid_dataloader:DataLoader,
+                device, exp_name:str, exp_dir:str, config:dict):
 
         self.model = model
         self.optimizer = optimizer
         self.lr_schedule = lr_schedule
-        self.dataloader = dataloader
+
+        self.train_dataloader = train_dataloader
         self.epoch = epoch
         self.batch_size = batch_size
+
+        self.valid_dataloader = valid_dataloader
+
         self.device = device
         self.exp_name = exp_name
         self.exp_dir = Path(exp_dir)
@@ -231,7 +262,7 @@ class trainer():
         self.steps = 0
 
         # TensorBoard setup - use exp_dir for unified naming
-        self.writer = SummaryWriter(str(self.exp_dir))
+        # self.writer = SummaryWriter(str(self.exp_dir))
         self.wandb_logger = wandb.init(
             project= "assignment1",
             config=config
@@ -242,154 +273,77 @@ class trainer():
         # For throughput tracking
         self.start_time = None
 
-        # Profiling setup
-        self.profiling_enabled = config.get('profiling', {}).get('enabled', False)
-        self.profiling_log_interval = config.get('profiling', {}).get('log_every_n_steps', 10)
-        if self.profiling_enabled:
-            self.profile_timers = {
-                'data_transfer': 0.0,
-                'forward': 0.0,
-                'loss_computation': 0.0,
-                'backward': 0.0,
-                'grad_clip': 0.0,
-                'optimizer_step': 0.0,
-                'logging': 0.0
-            }
-
-
-    def train_batch(self, input_sequence, targets):
-        # Timing start
+    def train_batch(self, input_sequence:torch.Tensor, targets:torch.Tensor):
         if self.start_time is None:
             self.start_time = time.time()
-
-        # === PROFILING: Data Transfer ===
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
+        
+        self.model.train()
         self.optimizer.zero_grad()
+
         input_sequence = input_sequence.to(self.device, non_blocking=True)
         targets = targets.to(self.device, non_blocking=True)
 
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            self.profile_timers['data_transfer'] += time.time() - t0
-
-        # === PROFILING: Forward Pass ===
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
         rlt = self.model(input_sequence)
 
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            self.profile_timers['forward'] += time.time() - t0
-
-        # === PROFILING: Loss Computation ===
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
-        
         loss = self.loss_fun(rlt, targets)
 
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            self.profile_timers['loss_computation'] += time.time() - t0
-
-        # === PROFILING: Backward Pass ===
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
         loss.backward()
-
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            self.profile_timers['backward'] += time.time() - t0
 
         self.iterations += self.batch_size # samples
         self.steps += 1 # update steps
 
-        # === PROFILING: Gradient Clipping ===
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
         total_norm = self.grad_clip.cal_total_l2norm(self.model.parameters())
         self.grad_clip(self.model.parameters())
 
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            self.profile_timers['grad_clip'] += time.time() - t0
-
-        # === PROFILING: Optimizer Step ===
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
         self.optimizer.step()
         self.lr_schedule.step()
-
-        if self.profiling_enabled:
-            torch.cuda.synchronize()
-            self.profile_timers['optimizer_step'] += time.time() - t0
 
         # Throughput
         elapsed = time.time() - self.start_time
         tokens_processed = self.iterations * self.model.context_length
         throughput = tokens_processed / elapsed
 
-        # === PROFILING: Logging ===
-        if self.profiling_enabled:
-            t0 = time.time()
-
-        self.writer.add_scalar("Loss/train", loss.item(), self.steps)
-        self.writer.add_scalar("Gradient/norm", total_norm, self.steps)
-        self.writer.add_scalar("Throughput/tokens_per_sec", throughput, self.steps)
-
         self.wandb_logger.log(
             {
-                "Loss/train": loss.item(), 
+                "Loss/train": loss.item(),
                 "Gradient/norm": total_norm,
                 "Throughput/tokens_per_sec": throughput
             }
         )
-        
-
-        if self.profiling_enabled:
-            self.profile_timers['logging'] += time.time() - t0
-
-            # Print profiling summary every N steps
-            if self.steps % self.profiling_log_interval == 0:
-                self._print_profile_summary()
 
         return loss
+    
+    def valid(self) -> torch.Tensor:
+        """
+        Valid on a whole valid dataset
+        """
+       
+        self.model.eval()
+        total_valid_batch = self.valid_dataloader.__len__()
+        
+        with torch.no_grad():
+            loss = 0
+            for valid_batch_index, (input_sequence, targets) in enumerate(self.valid_dataloader):
+                # print(f"valid_batch_index: {valid_batch_index}")
+                loss += self.valid_batch(input_sequence, targets)
+            
+            loss = loss / total_valid_batch
 
-    def _print_profile_summary(self):
-        """Print profiling summary and reset timers"""
-        total_time = sum(self.profile_timers.values())
-        print(f"\n{'='*60}")
-        print(f"Profiling Summary (Steps {self.steps - self.profiling_log_interval + 1}-{self.steps})")
-        print(f"{'='*60}")
-        print(f"{'Stage':<25} {'Time (s)':<12} {'Percentage':<12}")
-        print(f"{'-'*60}")
+        self.wandb_logger.log(
+            {
+                "Loss/valid": loss.item(),
+            }
+        )
+        
+        return loss
 
-        for stage, time_spent in self.profile_timers.items():
-            percentage = (time_spent / total_time * 100) if total_time > 0 else 0
-            print(f"{stage:<25} {time_spent:<12.4f} {percentage:<12.2f}%")
 
-        print(f"{'-'*60}")
-        print(f"{'Total':<25} {total_time:<12.4f} {'100.00%':<12}")
-        print(f"{'='*60}\n")
-
-        # Reset timers for next interval
-        for key in self.profile_timers:
-            self.profile_timers[key] = 0.0
-
-    def valid_batch(self):
-        pass
+    def valid_batch(self, input_sequence:torch.Tensor, targets:torch.Tensor):
+        input_sequence = input_sequence.to(self.device, non_blocking=True)
+        targets = targets.to(self.device, non_blocking=True)
+        rlt = self.model(input_sequence)
+        loss = self.loss_fun(rlt, targets)
+        return loss
 
     def test(self):
         pass
@@ -414,76 +368,53 @@ def training_together(config_path: str):
     model = model.to(builder_ins.config['device'])
     model.train()
 
-    dataset = builder_ins.build_torch_dataset()
-
+    train_dataset = builder_ins.build_torch_dataset(data_split="train")
     train_loader = DataLoader(
-            dataset,
+            train_dataset,
             batch_size=builder_ins.config["training"]["batch_size"],
             shuffle=True,
             num_workers=4,  # KEY: parallel data loading
             pin_memory=True,  # faster CPU->GPU transfer
             persistent_workers=True  # keep workers alive between epochs
         )
+    
+    valid_dataset = builder_ins.build_torch_dataset(data_split="valid")
+    valid_loader = DataLoader(
+            valid_dataset,
+            batch_size=builder_ins.config["training"]["batch_size"],
+            shuffle=True,
+            num_workers=0,  # KEY: parallel data loading
+            pin_memory=True,  # faster CPU->GPU transfer
+            persistent_workers=False  # keep workers alive between epochs
+        )
 
 
     optimizer = builder_ins.build_optimizer(model)
     total_batches = builder_ins.calculate_total_batches()
     lr_schedule = builder_ins.build_lr_schedule(optimizer, total_batches)
-    trainer_ins = builder_ins.build_trainer(model, optimizer, lr_schedule, train_loader, exp_dir)
+    trainer_ins = builder_ins.build_trainer(model, optimizer, lr_schedule, train_loader, valid_loader, exp_dir)
 
-    print(f"Total batches: {total_batches}")
+    print(f"Total training batches: {total_batches}")
     print(f"Starting training for {builder_ins.config['training']['epoch']} epochs...")
 
     # Training loop
     save_every_n = builder_ins.config['checkpoint']['save_every_n_steps']
-    profiling_enabled = builder_ins.config.get('profiling', {}).get('enabled', False)
-    profiling_log_interval = builder_ins.config.get('profiling', {}).get('log_every_n_steps', 10)
 
-    if profiling_enabled:
-        dataloader_time = 0.0
-        train_time = 0.0
-        dataloader_start = None
-    
     trainer_ins.wandb_logger.watch(model, trainer_ins.loss_fun)
 
     for epoch in range(builder_ins.config['training']['epoch']):
-        dataloader_iter = iter(train_loader)
-        for batch_idx in tqdm(range(total_batches), desc=f"Epoch {epoch+1}"):
-
-            if trainer_ins.steps >= total_batches:
-                break
-
-            # Measure dataloader time
-            if profiling_enabled:
-                dataloader_fetch_start = time.time()
-
-            input_sequence, targets = next(dataloader_iter)
-
-            if profiling_enabled:
-                dataloader_time += time.time() - dataloader_fetch_start
-
-            # Measure training time
-            if profiling_enabled:
-                train_start = time.time()
-
+        train_dataloader_iter = iter(train_loader)
+        
+        for _ in tqdm(range(total_batches), desc=f"Epoch {epoch+1}"):
+            # Train Model
+            input_sequence, targets = next(train_dataloader_iter)
             trainer_ins.train_batch(input_sequence, targets)
 
-            if profiling_enabled:
-                train_time += time.time() - train_start
-
-                # Print dataloader vs training comparison every N steps
-                if trainer_ins.steps % profiling_log_interval == 0 and trainer_ins.steps > 0:
-                    total = dataloader_time + train_time
-                    print(f"\n{'='*60}")
-                    print(f"DataLoader vs Training Time (Steps {trainer_ins.steps - profiling_log_interval + 1}-{trainer_ins.steps})")
-                    print(f"{'='*60}")
-                    print(f"DataLoader waiting:  {dataloader_time:.4f}s ({dataloader_time/total*100:.2f}%)")
-                    print(f"Training compute:    {train_time:.4f}s ({train_time/total*100:.2f}%)")
-                    print(f"{'='*60}\n")
-                    dataloader_time = 0.0
-                    train_time = 0.0
-
+            # Valid Model
+            # trainer_ins.valid()
             if trainer_ins.steps % save_every_n == 0 and trainer_ins.steps > 0:
+                trainer_ins.valid()
+
                 save_checkpoint(
                     model=model,
                     optimizer=optimizer,
@@ -492,7 +423,7 @@ def training_together(config_path: str):
                 )
 
     # Final checkpoint and cleanup
-    trainer_ins.writer.close()
+    # trainer_ins.writer.close()
     save_checkpoint(
         model=model,
         optimizer=optimizer,

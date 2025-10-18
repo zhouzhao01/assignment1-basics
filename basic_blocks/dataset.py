@@ -141,18 +141,21 @@ def test_real_data():
         print(owt_tokenizer.decode(input_seq[0].tolist()).replace("Ġ"," "))
 
 from torch.utils.data import Dataset
-class word_dataset(Dataset):
-    def __init__(self, dataset: npt.NDArray, context_length):
-        self.dataset = dataset
+class TokenDataset(Dataset):
+    def __init__(self, tokens: npt.NDArray, context_length):
+        self.tokens = tokens
         self.context_length = context_length
+        self.chunks = len(tokens) // context_length
     
     def __len__(self):
-        return len(self.dataset) - self.context_length
+        return self.chunks
 
     def __getitem__(self, idx):
-        sequence = self.dataset[idx:idx + self.context_length].copy()
-        target = self.dataset[idx + 1:idx + self.context_length + 1].copy()
-        return torch.LongTensor(sequence), torch.LongTensor(target)
+        start = idx   * self.context_length
+        end   = start + self.context_length
+        sequence = self.tokens[start: end].copy()
+        target   = self.tokens[start+1: end+1].copy()
+        return torch.from_numpy(sequence), torch.from_numpy(target)
 
 if __name__ == "__main__":
     # test_get_batch()
