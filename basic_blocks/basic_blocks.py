@@ -101,6 +101,40 @@ class SwiGLU(nn.Module):
         output = torch.einsum("d f,... s f ->... s d",self.linear_2, x1 * x3)
         return output
 
+class RoPE_fast(nn.Module):
+    def __init__(self, dim, theta=10000):
+        super().__init__()
+        inv_freq = 1. / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        self.seq_len_cached = None
+        self.cos_cached = None
+        self.sin_cached = None
+
+    def forward(self, x, seq_dim=1):
+        seq_len = x.shape[seq_dim]
+        if seq_len != self.seq_len_cached:
+            self.seq_len_cached = seq_len
+            t = torch.arange(x.shape[seq_dim], device=x.device).type_as(self.inv_freq)
+            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            self.cos_cached = emb.cos()[:, None, None, :]
+            self.sin_cached = emb.sin()[:, None, None, :]
+        return self.cos_cached, self.sin_cached
+
+# rotary pos emb helpers:
+def rotate_half(x):
+    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=x1.ndim - 1) # dim=-1 triggers a bug in torch < 1.8.0
+
+@torch.jit.script
+def apply_rotary_pos_emb(q, k, cos, sin):
+    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+@torch.jit.script
+def apply_rotary_pos_emb_single(q, cos, sin):
+    return (q * cos) + (rotate_half(q) * sin)
+
+
 class RoPE(nn.Module):
     def __init__(self, theta:float, d_k:int, max_seq_len:int, device=None):
         super().__init__()
@@ -220,17 +254,19 @@ class scaled_dot_product_attention(nn.Module):
         self.d_v = d_v
         self.softmax_layer = softmax()
         self.inf = inf
-
         self.device = device
+        self.scale = 1.0 / torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
     
     def forward(self, Q:torch.Tensor, K:torch.Tensor, V:torch.Tensor, mask=None):
-        dot_product = torch.einsum("... c k, ... v k -> ... c v", Q, K)
-        if mask != None:
-            B  = torch.zeros(mask.shape, device=self.device)
-            B[~mask.to(torch.bool)] = self.inf
-            dot_product = dot_product - B
+        dot_product = torch.einsum("... c k, ... v k -> ... c v", Q, K) * self.scale
+
+        if mask is not None:
+            dot_product = dot_product.masked_fill(~mask.to(torch.bool), float('-inf'))
+            # B  = torch.zeros(mask.shape, device=self.device)
+            # B[~mask.to(torch.bool)] = self.inf
+            # dot_product = dot_product - B
         
-        return self.softmax_layer(dot_product / torch.sqrt(torch.tensor(self.d_k)),dim=-1) @ V
+        return self.softmax_layer(dot_product, dim=-1) @ V
 
 class multihead_self_attention(nn.Module):
     def __init__(self, d_model:int, num_heads:int, max_seq_len=None, theta=None, device=None):
@@ -255,10 +291,11 @@ class multihead_self_attention(nn.Module):
         self.SDPA = scaled_dot_product_attention(self.d_k,self.d_v, device=device)
         
         self.max_seq_len = max_seq_len
+        self.theta = theta
         if theta and max_seq_len:
             self.RoPE = RoPE(theta=theta,d_k=self.d_k,max_seq_len=max_seq_len,device=device)
 
-    def forward(self,  in_features:torch.Tensor, flag_RoPE=None, flag_mask=True):
+    def forward(self,  in_features:torch.Tensor, flag_mask=True):
         """
         in_features (Float[Tensor, "... sequence_length d_in"]): Tensor to run your implementation on.
         """
@@ -290,31 +327,108 @@ class multihead_self_attention(nn.Module):
             raise ValueError(f"MHSA: NaN/Inf in W_K_in after projection!")
 
         # Apply RoPE to Query and Key
-        if flag_RoPE:
+        if self.theta:
             for head in range(self.num_heads):
                 W_Q_in[...,head * self.d_k: (head + 1) * self.d_k] = self.RoPE(W_Q_in[...,head * self.d_k: (head + 1) * self.d_k], torch.arange(0,sequence_length,1))
                 W_K_in[...,head * self.d_k: (head + 1) * self.d_k] = self.RoPE(W_K_in[...,head * self.d_k: (head + 1) * self.d_k], torch.arange(0,sequence_length,1))
 
+        # Reshape: [..., seq_len, num_heads * d_k] -> [..., seq_len, num_heads, d_k]
+        Q = W_Q_in.view(batch_size, sequence_length, self.num_heads, self.d_k)
+        K = W_K_in.view(batch_size, sequence_length, self.num_heads, self.d_k)
+        V = W_V_in.view(batch_size, sequence_length, self.num_heads, self.d_v)
+        # Transpose to: [..., num_heads, seq_len, d_k] for batched computation
+        Q = Q.transpose(1, 2)
+        K = K.transpose(1, 2)
+        V = V.transpose(1, 2)
+
         # Causal Mask
         if flag_mask:
-            mask = torch.tril(torch.ones(sequence_length, sequence_length)).unsqueeze(0).expand(batch_size, -1, -1)
+            mask = torch.tril(torch.ones(sequence_length, sequence_length, device=self.device)).unsqueeze(0).expand(batch_size, self.num_heads, -1, -1)
         else:
             mask = None
         
-        attentions = []
-        for head in range(self.num_heads):
-            attention = self.SDPA( Q=W_Q_in[...,head * self.d_k: (head + 1) * self.d_k],
-                                   K=W_K_in[...,head * self.d_k: (head + 1) * self.d_k], 
-                                   V=W_V_in[...,head * self.d_k: (head + 1) * self.d_k],
-                                   mask=mask) # [..., s v]
-            attentions.append(attention)
-        attentions = torch.cat(attentions, dim=-1)
+        attentions = self.SDPA(Q, K, V, mask)  # [..., num_heads, seq_len, d_k]
+        attentions = attentions.transpose(1,2).contiguous()
+        attentions = attentions.view(batch_size, sequence_length, self.num_heads * self.d_k)
+
         MHSA = torch.einsum("d v, ... s v -> ... s d", self.W_O, attentions)
 
         return MHSA
-    
+
+
+# PyTorch native MultiheadAttention wrapper (for performance comparison)
+class multihead_self_attention_fast(nn.Module):
+    """
+    Fast implementation using PyTorch's nn.MultiheadAttention.
+    Drop-in replacement for multihead_self_attention with same interface.
+    Note: RoPE is NOT supported in this version.
+    """
+    def __init__(self, d_model:int, num_heads:int, max_seq_len=None, theta=None, device=None):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.device = device
+        self.max_seq_len = max_seq_len
+
+        # PyTorch's MultiheadAttention expects (seq_len, batch, d_model) by default
+        # We'll use batch_first=True to get (batch, seq_len, d_model)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            dropout=0.0,
+            bias=False,
+            batch_first=True,
+            device=device
+        )
+
+        # For causal mask caching
+        self.register_buffer('causal_mask', None)
+        self._cached_seq_len = 0
+
+    def _get_causal_mask(self, seq_len, device):
+        """Get or create causal mask for given sequence length"""
+        if self.causal_mask is None or self._cached_seq_len != seq_len:
+            # PyTorch expects attn_mask of shape (seq_len, seq_len)
+            # where True means "mask out" (ignore)
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+            self.register_buffer('causal_mask', mask)
+            self._cached_seq_len = seq_len
+        return self.causal_mask
+
+    def forward(self, in_features:torch.Tensor, flag_RoPE=None, flag_mask=True):
+        """
+        Args:
+            in_features: (batch, seq_len, d_model)
+            flag_RoPE: Not supported in this fast version
+            flag_mask: Whether to apply causal mask
+        Returns:
+            output: (batch, seq_len, d_model)
+        """
+        if flag_RoPE:
+            raise NotImplementedError("RoPE is not supported in fast attention. Use original implementation.")
+
+        batch_size, seq_len, d_model = in_features.shape
+
+        if self.max_seq_len and seq_len > self.max_seq_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds max {self.max_seq_len}")
+
+        # Get causal mask if needed
+        attn_mask = self._get_causal_mask(seq_len, in_features.device) if flag_mask else None
+
+        # PyTorch's MHA with batch_first=True
+        # attn_output shape: (batch, seq_len, d_model)
+        attn_output, _ = self.attn(
+            in_features, in_features, in_features,
+            attn_mask=attn_mask,
+            need_weights=False,
+            is_causal=flag_mask  # Use optimized causal attention if available
+        )
+
+        return attn_output
+
+
 class transformer_block(nn.Module):
-    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int, device):
+    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int, device, use_fast_attn=False):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -323,30 +437,39 @@ class transformer_block(nn.Module):
         self.theta = theta
 
         self.device = device
-        
+        self.use_fast_attn = use_fast_attn
+
         self.rmsnorm_1 = rmsnorm(d_model=d_model, device=device)
-        self.MHSA = multihead_self_attention(d_model=d_model, num_heads=num_heads, 
-                                             max_seq_len=max_seq_len, theta=theta, device=device)
+
+        # Choose attention implementation
+        if use_fast_attn:
+            self.MHSA = multihead_self_attention_fast(d_model=d_model, num_heads=num_heads,
+                                                      max_seq_len=max_seq_len, theta=theta, device=device)
+        else:
+            self.MHSA = multihead_self_attention(d_model=d_model, num_heads=num_heads,
+                                                 max_seq_len=max_seq_len, theta=theta, device=device)
+
         self.rmsnorm_2 = rmsnorm(d_model=d_model, device=device)
         self.feedforward = SwiGLU(dim_model=d_model,dff=d_ff, device=device)
-        
 
-    def forward(self, x:torch.Tensor, flag_RoPE=True, flag_mask=True) -> torch.Tensor :
-        y = x + self.MHSA(self.rmsnorm_1(x), flag_RoPE=True, flag_mask=True)
+
+    def forward(self, x:torch.Tensor, flag_mask=True) -> torch.Tensor :
+        y = x + self.MHSA(self.rmsnorm_1(x), flag_mask=flag_mask)
         z = y + self.feedforward(self.rmsnorm_2(y))
         return z
 
 class transformer_lm(nn.Module):
     "uv run pytest -k test_transformer_lm"
-    def __init__(self, 
-                vocab_size:int, 
-                context_length:int, 
+    def __init__(self,
+                vocab_size:int,
+                context_length:int,
                 num_layers:int,
                 d_model: int,
                 num_heads: int,
                 d_ff: int,
                 rope_theta: float,
-                device = None
+                device = None,
+                use_fast_attn = False
                  ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -361,7 +484,7 @@ class transformer_lm(nn.Module):
         self.rope_theta = rope_theta
 
         self.device = device
-        
+
         # should be vocab_size, embed_dim
         self.embedding_layer = Embedding(vocab_size, d_model, device=device)
 
@@ -371,7 +494,8 @@ class transformer_lm(nn.Module):
                                d_ff=d_ff,
                                max_seq_len=context_length,
                                theta=rope_theta,
-                               device=device
+                               device=device,
+                               use_fast_attn=use_fast_attn
                                )
                                 for _ in range(num_layers)
                                ]) 
@@ -405,8 +529,7 @@ def unit_RoPE_test():
     length_s = 6
     RoPE_layer = RoPE(theta=10000,d_k=d_k,max_seq_len=12)
     print(RoPE_layer.rotation_matrix)
-
-
+    
     x = torch.randn(1,length_s,d_k)
     token_position = torch.arange(0,length_s,1)
     y = RoPE_layer(x,token_position)

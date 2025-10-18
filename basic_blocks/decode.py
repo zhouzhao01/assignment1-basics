@@ -140,11 +140,34 @@ def test_on_custim_llm():
 
     test_text = "Bob has an apple, which is so red"
     
-    owt_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_owt.json")
-    tokens = torch.tensor(owt_tokenizer.encode(test_text).ids, device=device)
+    # owt_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_owt.json")
+    tiny_tokenizer = Tokenizer(BPE()).from_file("/basic_blocks/tokenizer_tiny_story.json")
+    tokens = torch.tensor(tiny_tokenizer.encode(test_text).ids, device=device)
     tokens = torch.unsqueeze(tokens, dim=0)
     LLMDecoder_ins = LLMDecoder(temperature=0.8, top_p=0.9, max_length=50)
-    text = LLMDecoder_ins.generate(model, tokens, owt_tokenizer, 0)
+    text = LLMDecoder_ins.generate(model, tokens, tiny_tokenizer, 0)
+    print(clean_bpe_text(text))
+
+from scaffoldings import builder, load_checkpoint, set_random_seed
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+def test_on_custom_llm():
+    model_config_json_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/runs/transformer_lm_40m_4090/config.json"
+    builder_ins = builder(model_config_json_path)
+    set_random_seed(builder_ins.config["seed"])
+    model = builder_ins.build_model()
+    optimizer = builder_ins.build_optimizer(model)
+
+    ckp_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/runs/transformer_lm_40m_4090/step_32655.pt"
+    iterations = load_checkpoint(ckp_path,model,optimizer)
+
+    test_text = "Bob has an apple, which is so red"
+
+    tiny_tokenizer = Tokenizer(BPE()).from_file("basic_blocks/tokenizer_tiny_story.json")
+    tokens = torch.tensor(tiny_tokenizer.encode(test_text).ids, device=builder_ins.config["device"])
+    tokens = torch.unsqueeze(tokens, dim=0)
+    LLMDecoder_ins = LLMDecoder(temperature=0.8, top_p=0.9, max_length=256)
+    text = LLMDecoder_ins.generate(model, tokens, tiny_tokenizer, 0)
     print(clean_bpe_text(text))
 
 def clean_bpe_text(text):
@@ -171,4 +194,5 @@ def clean_bpe_text(text):
 
 if __name__ == "__main__":
     # test_on_GPT2()
-    test_on_custim_llm()
+    # test_on_custim_llm()
+    test_on_custom_llm()

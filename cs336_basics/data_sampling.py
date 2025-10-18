@@ -263,10 +263,46 @@ if __name__ == "__main__":
     from tokenizers.models import BPE
 
     owt_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_owt.json")
+    tiny_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_tiny_story.json")
+
+    # tokenize_dataset(
+    #     file_path="data/owt_valid.txt",
+    #     batch_size=2048,
+    #     tokenizer=owt_tokenizer,
+    #     output_path="data/owt_valid_encodings.npy",
+    # )
+
+    # tokenize_dataset(
+    #     file_path="data/TinyStoriesV2-GPT4-train.txt",
+    #     batch_size=2048,
+    #     tokenizer=owt_tokenizer,
+    #     output_path="data/TinyStoriesV2-GPT4-train.npy",
+    # )
+
+    # tokenize_dataset(
+    #     file_path="data/TinyStoriesV2-GPT4-valid.txt",
+    #     batch_size=2048,
+    #     tokenizer=owt_tokenizer,
+    #     output_path="data/TinyStoriesV2-GPT4-valid.npy",
+    # )
+
+    # tokenize_dataset(
+    #     file_path="data/owt_train.txt",
+    #     batch_size=2048,
+    #     tokenizer=owt_tokenizer,
+    #     output_path="data/owt_train.npy",
+    # )
 
     tokenize_dataset(
-        file_path="/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid.txt",
+        file_path="data/TinyStoriesV2-GPT4-train.txt",
         batch_size=2048,
-        tokenizer=owt_tokenizer,
-        output_path="/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy",
+        tokenizer=tiny_tokenizer,
+        output_path="data/TinyStoriesV2-GPT4-train_tinyTokenizer_10000.npy",
+    )
+
+    tokenize_dataset(
+        file_path="data/TinyStoriesV2-GPT4-valid.txt",
+        batch_size=2048,
+        tokenizer=tiny_tokenizer,
+        output_path="data/TinyStoriesV2-GPT4-valid_tinyTokenizer_10000.npy",
     )

@@ -101,9 +101,9 @@ def run_swiglu(
     # print("d_ff:{}",d_ff)
 
     SwiGLU_layer = custom_basic_blocks.SwiGLU(d_model,d_ff)
-    SwiGLU_layer.linear_1.W.data = w1_weight
-    SwiGLU_layer.linear_2.W.data = w2_weight
-    SwiGLU_layer.linear_3.W.data = w3_weight
+    SwiGLU_layer.linear_1.data = w1_weight
+    SwiGLU_layer.linear_2.data = w2_weight
+    SwiGLU_layer.linear_3.data = w3_weight
 
     return SwiGLU_layer(in_features)
 
@@ -258,6 +258,12 @@ def run_rope(
     """
     RoPE_layer = custom_basic_blocks.RoPE(theta=theta, d_k=d_k,max_seq_len=max_seq_len)
     return RoPE_layer(in_query_or_key, token_positions)
+    # from basic_blocks.basic_blocks import RoPE_fast, rotate_half, apply_rotary_pos_emb_single
+
+    # r = RoPE_fast(dim=max_seq_len, theta=theta)
+    # cos, sin = r(in_query_or_key)
+    # return apply_rotary_pos_emb_single(in_query_or_key, cos, sin)
+
 
 def run_transformer_block(
     d_model: int,
@@ -331,7 +337,7 @@ def run_transformer_block(
     """
     transformer_block = custom_basic_blocks.transformer_block(
         d_model=d_model, num_heads=num_heads, d_ff=d_ff,
-        max_seq_len=max_seq_len, theta=theta
+        max_seq_len=max_seq_len, theta=theta, device="cpu"
     )
 
     transformer_block.MHSA.load_state_dict({
@@ -520,7 +526,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    SiLu_layer = custom_basic_blocks.SiLu()
+    SiLu_layer = custom_basic_blocks.SiLU()
 
     return SiLu_layer(in_features)
 

@@ -1,5 +1,5 @@
 {
-    "exp_name": "transformer_lm_6layer_512d",
+    "exp_name": "transformer_lm_6layer_512d_1017",
     "seed": 42,
     "device": "cuda",
 
@@ -15,7 +15,7 @@
 
     "training": {
         "epoch": 1,
-        "batch_size": 8
+        "batch_size": 32
     },
 
     "optimizer": {
@@ -32,7 +32,7 @@
     },
 
     "data": {
-        "train_dataset": "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy"
+        "train_dataset": "data/TinyStoriesV2-GPT4-train.npy"
     },
 
     "checkpoint": {
