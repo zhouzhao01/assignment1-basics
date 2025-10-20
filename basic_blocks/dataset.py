@@ -37,6 +37,7 @@ class plain_dataset():
 
         return input_seq.to(self.device), target.to(self.device)
 
+
 def test_get_batch():
     dataset = np.arange(0, 100)
     context_length = 7
@@ -138,6 +139,23 @@ def test_real_data():
     for _ in range(10):
         input_seq, target_seq = plain_dataset_ins.get_batch()
         print(owt_tokenizer.decode(input_seq[0].tolist()).replace("Ġ"," "))
+
+from torch.utils.data import Dataset
+class TokenDataset(Dataset):
+    def __init__(self, tokens: npt.NDArray, context_length):
+        self.tokens = tokens
+        self.context_length = context_length
+        self.chunks = len(tokens) // context_length
+    
+    def __len__(self):
+        return self.chunks
+
+    def __getitem__(self, idx):
+        start = idx   * self.context_length
+        end   = start + self.context_length
+        sequence = self.tokens[start: end].copy()
+        target   = self.tokens[start+1: end+1].copy()
+        return torch.from_numpy(sequence), torch.from_numpy(target)
 
 if __name__ == "__main__":
     # test_get_batch()

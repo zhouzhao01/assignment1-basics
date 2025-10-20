@@ -1,0 +1,56 @@
+{
+    "exp_name": "transformer_lm_40m_4090",
+    "seed": 42,
+    "device": "cuda",
+
+    "tokenizer":{
+        "vocab_size":10000,
+        "path":"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_tiny_story.json"
+    },
+
+    "model": {
+        "vocab_size": 10000,
+        "context_length": 128,
+        "num_layers": 4,
+        "d_model": 128,
+        "num_heads": 4,
+        "d_ff": 384,
+        
+        "use_fast_attn": false,
+        "flog_rope": false,
+        "rope_theta": null
+    },
+
+    "training": {
+        "epoch": 1,
+        "batch_size": 8
+    },
+
+    "optimizer": {
+        "type": "AdamW",
+        "lr": 6e-4,
+        "betas": [0.9, 0.95],
+        "weight_decay": 0.1,
+        "eps": 1e-8
+    },
+
+    "lr_scheduler": {
+        "type": "CosineAnnealingLR",
+        "eta_min": 6e-5
+    },
+
+    "data": {
+        "train_dataset": "data/TinyStoriesV2-GPT4-train_tinyTokenizer_10000.npy"
+    },
+
+    "checkpoint": {
+        "save_dir": "runs",
+        "save_every_n_steps": 1000,
+        "keep_last_n": 3
+    },
+
+    "profiling": {
+        "enabled": true,
+        "log_every_n_steps": 10
+    }
+}
