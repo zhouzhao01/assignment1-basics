@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import math
 
+from basic_blocks.RoPE import RoPE_fast as RoPE
+
 class Linear(nn.Module):
     def __init__(self, d_in, d_out, device=None, dtype=None):
         super().__init__()
@@ -122,141 +124,6 @@ class SiLU_FFN(nn.Module):
 
         return output
 
-class RoPE_fast(nn.Module):
-    def __init__(self, dim, theta=10000):
-        super().__init__()
-        inv_freq = 1. / (theta ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
-        self.seq_len_cached = None
-        self.cos_cached = None
-        self.sin_cached = None
-
-    def forward(self, x, seq_dim=1):
-        seq_len = x.shape[seq_dim]
-        if seq_len != self.seq_len_cached:
-            self.seq_len_cached = seq_len
-            t = torch.arange(x.shape[seq_dim], device=x.device).type_as(self.inv_freq)
-            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.cos_cached = emb.cos()[:, None, None, :]
-            self.sin_cached = emb.sin()[:, None, None, :]
-        return self.cos_cached, self.sin_cached
-
-# rotary pos emb helpers:
-def rotate_half(x):
-    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=x1.ndim - 1) # dim=-1 triggers a bug in torch < 1.8.0
-
-@torch.jit.script
-def apply_rotary_pos_emb(q, k, cos, sin):
-    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
-
-@torch.jit.script
-def apply_rotary_pos_emb_single(q, cos, sin):
-    return (q * cos) + (rotate_half(q) * sin)
-
-
-class RoPE(nn.Module):
-    def __init__(self, theta:float, d_k:int, max_seq_len:int, device=None):
-        super().__init__()
-
-        self.theta = theta
-        self.d_k = d_k
-        self.device = device
-
-        # TODO: OPTIMIZATION STEP 1 - Replace rotation matrices with sin/cos caches
-        # Current approach: O(max_seq_len × d_k²) memory for full matrices
-        self.rotation_matrix = torch.zeros(max_seq_len,d_k,d_k, device=device)
-        for seq_positon in range(max_seq_len):
-            self.rotation_matrix[seq_positon,...] = self.cal_rotation_per_position(seq_positon)
-
-        # TODO: OPTIMIZATION STEP 2 - Pre-compute only sin and cos values
-        # Suggested implementation:
-        # 1. Create frequency vector: freqs = 1.0 / (theta ** (torch.arange(0, d_k, 2) / d_k))
-        # 2. Create position vector: positions = torch.arange(max_seq_len)
-        # 3. Compute angles: angles = positions.unsqueeze(1) * freqs.unsqueeze(0)
-        # 4. Pre-compute cos and sin: cos_cache = angles.cos(), sin_cache = angles.sin()
-        # 5. Use register_buffer to store them:
-        #    self.register_buffer('cos_cache', cos_cache, persistent=False)
-        #    self.register_buffer('sin_cache', sin_cache, persistent=False)
-        # This reduces memory to O(max_seq_len × d_k/2)
-
-    def cal_rotation_per_position(self, token_position:int):
-        # TODO: OPTIMIZATION STEP 5 - This method can be removed in optimized version
-        # In the optimized implementation, you won't need to build full rotation matrices
-        # The sin/cos caches in __init__ will replace this functionality
-        rotation_matrix = torch.zeros(self.d_k, self.d_k, device=self.device)
-
-        for k in torch.arange(1, self.d_k/2+1, 1):
-            theta_i_d =  token_position / (self.theta ** ((2 * (k - 1)) / self.d_k))
-            rotation_subblock_element = torch.tensor(
-                [
-                    [torch.cos(theta_i_d), -torch.sin(theta_i_d)],
-                    [torch.sin(theta_i_d),  torch.cos(theta_i_d)]
-                ],
-                dtype=torch.float32,
-                device= self.device
-            )
-            # k: 1, 2, 3, ...
-            left = 2 * (k.to(torch.int) - 1)   # left: 0, 2, 4, ...
-            right = 2 * k.to(torch.int)     # right: 1, 3, 5, ...
-            rotation_matrix[left:right, left:right] = rotation_subblock_element
-
-        return rotation_matrix
-
-    # TODO: OPTIMIZATION STEP 6 - Add helper method for applying rotation (optional)
-    # def _apply_rotation(self, x, cos, sin):
-    #     """Apply rotation to x using precomputed cos and sin values."""
-    #     # Reshape to separate feature pairs
-    #     x_reshape = x.reshape(*x.shape[:-1], -1, 2)
-    #     # Apply rotation
-    #     x_rot = torch.empty_like(x_reshape)
-    #     x_rot[..., 0] = x_reshape[..., 0] * cos - x_reshape[..., 1] * sin
-    #     x_rot[..., 1] = x_reshape[..., 0] * sin + x_reshape[..., 1] * cos
-    #     # Reshape back
-    #     return x_rot.reshape(*x.shape)
-    
-    def forward(self, x:torch.Tensor, token_position:torch.Tensor) -> torch.Tensor:
-        # TODO: OPTIMIZATION STEP 3 - Replace matrix multiplication with element-wise ops
-        # Current approach: Loop through positions and apply matrix multiplication
-        # x = x.to(self.device)
-        # breakpoint()
-
-        # Debug assertions
-        max_pos = token_position.max().item()
-        assert max_pos < self.rotation_matrix.shape[0], \
-            f"RoPE Error: position {max_pos} exceeds rotation_matrix size {self.rotation_matrix.shape[0]}. " \
-            f"x.shape={x.shape}, token_position range=[{token_position.min().item()}, {max_pos}]"
-
-        # Check for NaN/Inf in input
-        if torch.isnan(x).any():
-            raise ValueError(f"RoPE: NaN detected in input x! Shape: {x.shape}")
-        if torch.isinf(x).any():
-            raise ValueError(f"RoPE: Inf detected in input x! Shape: {x.shape}")
-
-        for position in token_position:
-            """
-            Be careful. It should be x * R.T.
-            """
-            position = position.item()
-            x[...,position,:] =   x[...,position,:]  @ self.rotation_matrix[position,...].T
-
-        # TODO: OPTIMIZATION STEP 4 - Optimized forward pass
-        # Suggested implementation:
-        # 1. Reshape x to separate pairs: x_reshape = x.reshape(*x.shape[:-1], -1, 2)
-        # 2. Get cos/sin for needed positions:
-        #    cos = self.cos_cache[token_position]  # Shape: [seq_len, d_k//2]
-        #    sin = self.sin_cache[token_position]  # Shape: [seq_len, d_k//2]
-        # 3. Expand cos/sin to match x's batch dimensions if needed
-        # 4. Apply rotation to pairs:
-        #    x_rot = torch.empty_like(x_reshape)
-        #    x_rot[..., 0] = x_reshape[..., 0] * cos - x_reshape[..., 1] * sin
-        #    x_rot[..., 1] = x_reshape[..., 0] * sin + x_reshape[..., 1] * cos
-        # 5. Reshape back: return x_rot.reshape(*x.shape)
-        # This avoids loops and uses efficient element-wise operations
-
-        return x 
-
 class softmax(nn.Module):
     def __init__(self):
         super().__init__()
@@ -342,16 +209,10 @@ class multihead_self_attention(nn.Module):
         W_V_in = torch.einsum("v d, ... s d -> ... s v", self.W_V, in_features)
 
         # Check for NaN/Inf after projections
-        if torch.isnan(W_Q_in).any() or torch.isinf(W_Q_in).any():
-            raise ValueError(f"MHSA: NaN/Inf in W_Q_in after projection!")
-        if torch.isnan(W_K_in).any() or torch.isinf(W_K_in).any():
-            raise ValueError(f"MHSA: NaN/Inf in W_K_in after projection!")
-
-        # Apply RoPE to Query and Key
-        if self.theta:
-            for head in range(self.num_heads):
-                W_Q_in[...,head * self.d_k: (head + 1) * self.d_k] = self.RoPE(W_Q_in[...,head * self.d_k: (head + 1) * self.d_k], torch.arange(0,sequence_length,1))
-                W_K_in[...,head * self.d_k: (head + 1) * self.d_k] = self.RoPE(W_K_in[...,head * self.d_k: (head + 1) * self.d_k], torch.arange(0,sequence_length,1))
+        # if torch.isnan(W_Q_in).any() or torch.isinf(W_Q_in).any():
+        #     raise ValueError(f"MHSA: NaN/Inf in W_Q_in after projection!")
+        # if torch.isnan(W_K_in).any() or torch.isinf(W_K_in).any():
+        #     raise ValueError(f"MHSA: NaN/Inf in W_K_in after projection!")
 
         # Reshape: [..., seq_len, num_heads * d_k] -> [..., seq_len, num_heads, d_k]
         Q = W_Q_in.view(batch_size, sequence_length, self.num_heads, self.d_k)
@@ -361,6 +222,11 @@ class multihead_self_attention(nn.Module):
         Q = Q.transpose(1, 2)
         K = K.transpose(1, 2)
         V = V.transpose(1, 2)
+
+        # Apply RoPE to Query and Key
+        if self.theta:
+            Q = self.RoPE(Q)
+            K = self.RoPE(K)
 
         # Causal Mask
         if flag_mask:
@@ -375,7 +241,6 @@ class multihead_self_attention(nn.Module):
         MHSA = torch.einsum("d v, ... s v -> ... s d", self.W_O, attentions)
 
         return MHSA
-
 
 # PyTorch native MultiheadAttention wrapper (for performance comparison)
 class multihead_self_attention_fast(nn.Module):
@@ -453,7 +318,8 @@ class transformer_block(nn.Module):
                  device, 
                  use_fast_attn=False,
                  norm_type:str="pre-norm",
-                 activation_type:str="SwiGLU"):
+                 activation_type:str="SwiGLU"
+                 ):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -483,7 +349,6 @@ class transformer_block(nn.Module):
         elif self.activation_type == "SiLU_FFN":
             self.feedforward = SiLU_FFN(dim_model=d_model, device=device)
 
-
     def forward(self, x:torch.Tensor, flag_mask=True) -> torch.Tensor :
         if self.norm_type == "no-norm":
             y = x + self.MHSA(x, flag_mask=flag_mask)
@@ -508,7 +373,9 @@ class transformer_lm(nn.Module):
                 d_ff: int,
                 rope_theta: float,
                 device = None,
-                use_fast_attn = False
+                use_fast_attn = False,
+                norm_type:str="pre-norm",
+                activation_type:str="SwiGLU"
                  ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -529,12 +396,14 @@ class transformer_lm(nn.Module):
 
         self.transformer_layers = nn.ModuleList(
             [transformer_block(d_model=d_model,
-                               num_heads=num_heads,
-                               d_ff=d_ff,
-                               max_seq_len=context_length,
-                               theta=rope_theta,
-                               device=device,
-                               use_fast_attn=use_fast_attn
+                                num_heads=num_heads,
+                                d_ff=d_ff,
+                                max_seq_len=context_length,
+                                theta=rope_theta,
+                                device=device,
+                                use_fast_attn=use_fast_attn,
+                                norm_type=norm_type,
+                                activation_type=activation_type
                                )
                                 for _ in range(num_layers)
                                ]) 
@@ -635,14 +504,14 @@ def test_multihead_self_attention():
 
     print(f"MHSA test passed! Output shape: {output.shape}")
 
-def test_transformer_block(norm_type:str , gate_type:str):
+def test_transformer_block(norm_type:str , gate_type:str, theta):
     """Minimal test for transformer_block"""
     # Setup
     d_model = 128
     num_heads = 8
     d_ff = 512
     max_seq_len = 32
-    theta = 10000.0
+    # theta = theta
     batch_size = 2
     seq_len = 16
 
@@ -867,7 +736,9 @@ if __name__ == "__main__":
 
     norm_type = ["no-norm","pre-norm",'post-norm']
     gate_type = ["SwiGLU","SiLU_FFN"]
+    THETA = [10000, None]
 
     for norm in norm_type:
         for gate in gate_type:
-            test_transformer_block(norm, gate)
+            for theta in THETA:
+                test_transformer_block(norm, gate, theta)

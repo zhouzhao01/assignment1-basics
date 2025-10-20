@@ -17,11 +17,11 @@
         "d_ff": 1344,
         
         "use_fast_attn": false,
-        "rope_theta": null,
 
-        "layer_norm": "pre",
-        "posision_embedding": "NoPE",
-        "activation_function": "SwiGLU"
+        "rope_theta": null,
+        "norm_type": "pre-norm",
+        "activation_type": "SwiGLU"
+        
     },
 
     "training": {

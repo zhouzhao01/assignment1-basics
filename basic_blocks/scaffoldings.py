@@ -96,9 +96,13 @@ class builder():
             d_model=m['d_model'],
             num_heads=m['num_heads'],
             d_ff=m['d_ff'],
-            rope_theta=m['rope_theta'],
+            
             device=self.config['device'],
             use_fast_attn=m['use_fast_attn'],
+
+            rope_theta=m['rope_theta'],
+            norm_type=m['norm_type'],
+            activation_type=m['activation_type']
         )
 
     def build_dataset(self) -> plain_dataset:
@@ -326,6 +330,10 @@ def training_together(config_path:str=None):
         wandb_runs.config["beta1"], 
         wandb_runs.config["beta2"]
     ]
+
+    builder_ins.config["model"]["rope_theta"] = wandb_runs.config["theta"]
+    builder_ins.config["model"]["norm_type"] = wandb_runs.config["norm_type"]
+    builder_ins.config["model"]["activation_type"] = wandb_runs.config["activation_type"]
 
     # builder_ins.config["optimizer"]["betas"] = wandb_runs.config["weight_decay"]
 
