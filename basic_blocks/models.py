@@ -55,13 +55,6 @@ class rmsnorm(nn.Module):
 
         return RMS_norm.to(in_dtype)
 
-class SiLU(nn.Module):
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, x:torch.Tensor):
-        return x * torch.sigmoid(x)
-
 class GLU(nn.Module):
     def __init__(self, dim_in:int, dim_out:int):
         super().__init__()
@@ -72,6 +65,8 @@ class GLU(nn.Module):
     def forward(self, x:torch.Tensor):
         return torch.sigmoid(self.linear_1(x)) * self.linear_2(x)
 
+def SiLU(x):
+    return x * torch.sigmoid(x)
 
 class SwiGLU(nn.Module):
     def __init__(self, dim_model:int, dff:int = None, device:str=None):
@@ -93,12 +88,38 @@ class SwiGLU(nn.Module):
         torch.nn.init.trunc_normal_(self.linear_2, mean=0.0, std=1.0/math.sqrt(self.dff))
         torch.nn.init.trunc_normal_(self.linear_3, mean=0.0, std=1.0/math.sqrt(self.dim_model))
 
-        self.SiLU = SiLU()
+        self.SiLU = torch.nn.SiLU()
 
     def forward(self, x:torch.Tensor):
         x1 = self.SiLU(torch.einsum("f d,... s d ->... s f",self.linear_1,x))
-        x3 = torch.einsum("f d,... s d ->... s f",self.linear_3,x)
+        x3 =           torch.einsum("f d,... s d ->... s f",self.linear_3,x)
         output = torch.einsum("d f,... s f ->... s d",self.linear_2, x1 * x3)
+        return output
+    
+class SiLU_FFN(nn.Module):
+    def __init__(self, dim_model:int, dff:int=None, device:str=None):
+        super().__init__()
+
+        self.dim_model = dim_model
+        self.device = device
+
+        if dff == None:
+            self.dff = 4 * dim_model
+        else:
+            self.dff = dff
+
+        self.linear_1 = nn.Parameter(torch.empty(self.dff,        self.dim_model,device=device))
+        self.linear_2 = nn.Parameter(torch.empty(self.dim_model,  self.dff      ,device=device))
+
+        torch.nn.init.trunc_normal_(self.linear_1, mean=0.0, std=1.0/math.sqrt(self.dim_model))
+        torch.nn.init.trunc_normal_(self.linear_2, mean=0.0, std=1.0/math.sqrt(self.dff))
+
+        self.SiLU = torch.nn.SiLU()
+
+    def forward(self, x:torch.Tensor):
+        x1 = self.SiLU(torch.einsum("f d,... s d ->... s f",self.linear_1, x))
+        output =       torch.einsum("d f,... s f ->... s d",self.linear_2, x1)
+
         return output
 
 class RoPE_fast(nn.Module):
@@ -428,7 +449,11 @@ class multihead_self_attention_fast(nn.Module):
 
 
 class transformer_block(nn.Module):
-    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int, device, use_fast_attn=False):
+    def __init__(self, d_model:int, num_heads:int, d_ff:int, max_seq_len:int, theta:int, 
+                 device, 
+                 use_fast_attn=False,
+                 norm_type:str="pre-norm",
+                 activation_type:str="SwiGLU"):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -438,6 +463,8 @@ class transformer_block(nn.Module):
 
         self.device = device
         self.use_fast_attn = use_fast_attn
+        self.norm_type = norm_type
+        self.activation_type = activation_type
 
         self.rmsnorm_1 = rmsnorm(d_model=d_model, device=device)
 
@@ -450,12 +477,24 @@ class transformer_block(nn.Module):
                                                  max_seq_len=max_seq_len, theta=theta, device=device)
 
         self.rmsnorm_2 = rmsnorm(d_model=d_model, device=device)
-        self.feedforward = SwiGLU(dim_model=d_model,dff=d_ff, device=device)
+
+        if self.activation_type == "SwiGLU":
+            self.feedforward = SwiGLU(dim_model=d_model,dff=d_ff, device=device)
+        elif self.activation_type == "SiLU_FFN":
+            self.feedforward = SiLU_FFN(dim_model=d_model, device=device)
 
 
     def forward(self, x:torch.Tensor, flag_mask=True) -> torch.Tensor :
-        y = x + self.MHSA(self.rmsnorm_1(x), flag_mask=flag_mask)
-        z = y + self.feedforward(self.rmsnorm_2(y))
+        if self.norm_type == "no-norm":
+            y = x + self.MHSA(x, flag_mask=flag_mask)
+            z = y + self.feedforward(y)
+        elif self.norm_type == "pre-norm":
+            y = x + self.MHSA(self.rmsnorm_1(x), flag_mask=flag_mask)
+            z = y + self.feedforward(self.rmsnorm_2(y))
+        elif self.norm_type == "post-norm":
+            y = self.rmsnorm_1(x + self.MHSA(x, flag_mask=flag_mask))
+            z = self.rmsnorm_2(y + self.feedforward(y))
+
         return z
 
 class transformer_lm(nn.Module):
@@ -596,7 +635,7 @@ def test_multihead_self_attention():
 
     print(f"MHSA test passed! Output shape: {output.shape}")
 
-def test_transformer_block():
+def test_transformer_block(norm_type:str , gate_type:str):
     """Minimal test for transformer_block"""
     # Setup
     d_model = 128
@@ -608,7 +647,9 @@ def test_transformer_block():
     seq_len = 16
 
     # Create block
-    block = transformer_block(d_model, num_heads, d_ff, max_seq_len, theta)
+    block = transformer_block(d_model, num_heads, d_ff, max_seq_len, theta,
+                              device="cpu",
+                              norm_type=norm_type, activation_type=gate_type)
 
     # Test input
     x = torch.randn(batch_size, seq_len, d_model)
@@ -803,23 +844,30 @@ if __name__ == "__main__":
     # test_transformer_lm()
 
     # Model configuration
-    vocab_size = 32000
-    context_length = 128
-    num_layers = 48
-    d_model = 512
-    num_heads = 8
-    d_ff = 2048
+    # vocab_size = 32000
+    # context_length = 128
+    # num_layers = 48
+    # d_model = 512
+    # num_heads = 8
+    # d_ff = 2048
 
-    # Create model
-    model = transformer_lm(
-        vocab_size=vocab_size,
-        context_length=context_length,
-        num_layers=num_layers,
-        d_model=d_model,
-        num_heads=num_heads,
-        d_ff=d_ff,
-        rope_theta=10000.0
-    )
+    # # Create model
+    # model = transformer_lm(
+    #     vocab_size=vocab_size,
+    #     context_length=context_length,
+    #     num_layers=num_layers,
+    #     d_model=d_model,
+    #     num_heads=num_heads,
+    #     d_ff=d_ff,
+    #     rope_theta=10000.0
+    # )
 
-    # Calculate and display model statistics
-    calculate_model_stats(model, vocab_size, context_length, num_layers, d_model, num_heads, d_ff)
+    # # Calculate and display model statistics
+    # calculate_model_stats(model, vocab_size, context_length, num_layers, d_model, num_heads, d_ff)
+
+    norm_type = ["no-norm","pre-norm",'post-norm']
+    gate_type = ["SwiGLU","SiLU_FFN"]
+
+    for norm in norm_type:
+        for gate in gate_type:
+            test_transformer_block(norm, gate)

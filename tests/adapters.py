@@ -178,7 +178,7 @@ def run_multihead_self_attention(
         "W_O":o_proj_weight}
     )
 
-    return MHSA(in_features, flag_RoPE=None, flag_mask=True)
+    return MHSA(in_features, flag_mask=True)
 
 def run_multihead_self_attention_with_rope(
     d_model: int,
@@ -234,7 +234,7 @@ def run_multihead_self_attention_with_rope(
     )
 
 
-    return MHSA(in_features, flag_RoPE=True, flag_mask=True)
+    return MHSA(in_features, flag_mask=True)
 
 
 def run_rope(
@@ -258,11 +258,6 @@ def run_rope(
     """
     RoPE_layer = custom_basic_blocks.RoPE(theta=theta, d_k=d_k,max_seq_len=max_seq_len)
     return RoPE_layer(in_query_or_key, token_positions)
-    # from basic_blocks.basic_blocks import RoPE_fast, rotate_half, apply_rotary_pos_emb_single
-
-    # r = RoPE_fast(dim=max_seq_len, theta=theta)
-    # cos, sin = r(in_query_or_key)
-    # return apply_rotary_pos_emb_single(in_query_or_key, cos, sin)
 
 
 def run_transformer_block(
@@ -354,18 +349,11 @@ def run_transformer_block(
     "g":weights["ln2.weight"]
     })
 
-    # transformer_block.feedforward.load_state_dict({
-    #     "linear_1":weights["ffn.w1.weight"],
-    #     "linear_2":weights["ffn.w2.weight"],
-    #     "linear_3":weights["ffn.w3.weight"],
-
-    # })
-
     transformer_block.feedforward.linear_1.data = weights["ffn.w1.weight"]
     transformer_block.feedforward.linear_2.data = weights["ffn.w2.weight"]
     transformer_block.feedforward.linear_3.data = weights["ffn.w3.weight"]
 
-    output = transformer_block(in_features, flag_RoPE=True, flag_mask=True)
+    output = transformer_block(in_features, flag_mask=True)
 
     return output
 
@@ -526,9 +514,8 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    SiLu_layer = custom_basic_blocks.SiLU()
 
-    return SiLu_layer(in_features)
+    return custom_basic_blocks.SiLU(in_features)
 
 
 def run_get_batch(
@@ -666,7 +653,7 @@ def run_save_checkpoint(
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
 
-    from basic_blocks.scaffoldings import save_checkpoint
+    from basic_blocks.checkpointing import save_checkpoint
     save_checkpoint(model, optimizer, iteration, out)
 
 
@@ -688,10 +675,8 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    from basic_blocks.scaffoldings import load_checkpoint
+    from basic_blocks.checkpointing import load_checkpoint
     return load_checkpoint(src, model, optimizer)
-    raise NotImplementedError
-
 
 def get_tokenizer(
     vocab: dict[int, bytes],

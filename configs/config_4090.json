@@ -5,7 +5,7 @@
 
     "tokenizer":{
         "vocab_size":10000,
-        "path":"/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_tiny_story.json"
+        "path":"basic_blocks/tokenizer_tiny_story.json"
     },
 
     "model": {
