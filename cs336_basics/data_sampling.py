@@ -262,11 +262,18 @@ if __name__ == "__main__":
     from tokenizers import Tokenizer
     from tokenizers.models import BPE
 
-    owt_tokenizer = Tokenizer(BPE()).from_file("/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/basic_blocks/tokenizer_owt.json")
+    owt_tokenizer = Tokenizer(BPE()).from_file("basic_blocks/tokenizer_owt.json")
 
     tokenize_dataset(
-        file_path="/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid.txt",
+        file_path="data/TinyStoriesV2-GPT4-train.txt",
         batch_size=2048,
         tokenizer=owt_tokenizer,
-        output_path="/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/owt_valid_encodings.npy",
+        output_path="data/TinyStoriesV2-GPT4-train.npy",
+    )
+
+    tokenize_dataset(
+        file_path="data/TinyStoriesV2-GPT4-valid.txt",
+        batch_size=2048,
+        tokenizer=owt_tokenizer,
+        output_path="data/TinyStoriesV2-GPT4-valid.npy",
     )

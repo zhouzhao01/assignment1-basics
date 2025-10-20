@@ -29,6 +29,7 @@ dependencies = [
     "tensorboard>=2.20.0",
     "transformers>=4.57.0",
     "weave>=0.52.9",
+    "torch>=2.2.2",
 ]
 
 [build-system]

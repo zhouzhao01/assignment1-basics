@@ -32,7 +32,7 @@
     },
 
     "data": {
-        "train_dataset": "data/owt_valid_encodings.npy"
+        "train_dataset": "data/TinyStoriesV2-GPT4-train.npy"
     },
 
     "checkpoint": {

@@ -51,7 +51,7 @@ def find_chunk_boundaries(
 
 ## Usage
 
-data_path = "/mnt/aat/zzhao.zhou/cs336_2025/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+data_path = "/home/zzhao.zhou/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
 with open(data_path, "rb") as f:
     num_processes = 4
     boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")

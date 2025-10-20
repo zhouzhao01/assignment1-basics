@@ -321,4 +321,6 @@ def training_together(config_path: str = "configs/config.json"):
     print(f"Training complete. Final checkpoint saved to {exp_dir / f'step_{total_batches}.pt'}")
 
 if __name__ == "__main__":
-    training_together()
+    config_path = "configs/A100_config.json"
+    training_together(config_path)
+    pass
