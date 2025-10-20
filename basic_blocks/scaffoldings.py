@@ -1,31 +1,23 @@
-import torch
-import os
-import subprocess
-
-from typing import IO, Any, BinaryIO
+# Standard library imports
 import json
-from pathlib import Path
-
-from dataset import plain_dataset
-from dataset import TokenDataset
-from torch.utils.data import DataLoader
-
-from metrics import cross_entropy_loss
-
-from optimizer import AdamW, grad_clip, lr_cosine_schedule
-
-from models import transformer_lm
-
-import numpy as np
-
-from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
+import os
 import time
+from pathlib import Path
+from typing import IO, Any, BinaryIO
+
+# Third-party imports
+import numpy as np
+import torch
+import yaml
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 import wandb
 
-from tqdm import tqdm
-
-import yaml
+# Local/project imports
+from dataset import TokenDataset, plain_dataset
+from metrics import cross_entropy_loss
+from models import transformer_lm
+from optimizer import AdamW, grad_clip, lr_cosine_schedule
 
 def set_random_seed(seed):
     torch.manual_seed(seed)
@@ -378,7 +370,11 @@ def training_together(config_path:str=None):
     
     builder_ins.config["optimizer"]["weight_decay"] = wandb_runs.config["weight_decay"]
 
-    # print(f"builder_ins.config: {builder_ins.config}")
+    builder_ins.config["optimizer"]["betas"] = [
+        wandb_runs.config["beta1"], 
+        wandb_runs.config["beta2"]
+    ]
+
     # builder_ins.config["optimizer"]["betas"] = wandb_runs.config["weight_decay"]
 
     set_random_seed(builder_ins.config['seed'])
@@ -457,39 +453,4 @@ def training_together(config_path:str=None):
     trainer_ins.wandb_logger.finish()
 
 if __name__ == "__main__":
-    # sweep_configuration = {
-    #     "method": "random",
-    #     "name": "assignment1-optimizer-lr",
-    #     "description": "sweep optimizer and batchsize hyperparameters",
-    #     "metric": {
-    #         "goal": "minimize", 
-    #         "name": "Loss/train"
-    #     },
-    #     "parameters": {
-    #         "batch_size": {
-    #             "values": [1, 16, 32, 64, 128, 256]
-    #         },
-
-    #         "max_learning_rate": {
-    #             "values": [1e-4, 3e-4, 5e-4, 1e-3]
-    #         },
-    #         "min_lr_ratio": {
-    #             "values": [0.01, 0.05, 0.1]
-    #         },
-    #         "warmup_iters": {
-    #             "values": [500, 1000, 2000, 3000, 4000, 5000]
-    #         },
-    #         "weight_decay": {
-    #             "values": [0.0, 0.01, 0.1]
-    #         },
-    #     }
-    # }
-
-    # # Create sweep
-    # sweep_id = wandb.sweep(
-    #     sweep_configuration, 
-    #     project="assignment1",
-    #     entity="push-seminar-4l-hong-kong-university-of-science-and-tech"  # or your entity name
-    # )
-
     training_together("configs/config_4090.json")
