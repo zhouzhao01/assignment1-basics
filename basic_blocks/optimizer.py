@@ -2,14 +2,12 @@
 # Zhao Zhou
 # 2025.9.26
 
-import torch
-import torch.nn as nn
-
 from  collections.abc import Callable, Iterable
 from typing import Optional
 
-
 import math
+import torch
+import torch.nn as nn
 
 class AdamW(torch.optim.Optimizer):
     def __init__(self, params, lr=1e-3, weight_decay=0.01, betas = (0.9, 0.999), eps=1e-8                ):

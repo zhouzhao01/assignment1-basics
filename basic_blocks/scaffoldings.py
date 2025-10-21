@@ -194,7 +194,8 @@ class builder():
 
 class trainer():
     def __init__(self, model:transformer_lm,
-                optimizer:AdamW, lr_schedule:torch.optim.lr_scheduler.CosineAnnealingLR,
+                optimizer:AdamW, 
+                lr_schedule:lr_cosine_schedule,
                 train_dataloader:DataLoader, epoch:int, batch_size:int,
                 valid_dataloader:DataLoader,
                 device, exp_name:str, exp_dir:str, config:dict,
@@ -241,7 +242,7 @@ class trainer():
 
         rlt = self.model(input_sequence)
 
-        loss = self.loss_fun(rlt, targets)
+        loss:torch.Tensor = self.loss_fun(rlt, targets)
 
         loss.backward()
 
@@ -254,6 +255,9 @@ class trainer():
         self.optimizer.step()
         self.lr_schedule.step()
 
+        # Learning Rate
+        lr = self.lr_schedule.get_lr(self.steps)
+
         # Throughput
         elapsed = time.time() - self.start_time
         tokens_processed = self.iterations * self.model.context_length
@@ -261,9 +265,10 @@ class trainer():
 
         self.wandb_logger.log(
             {
-                "Loss/train": loss.item(),
+                "Loss/train": loss,
                 "Gradient/norm": total_norm,
-                "Throughput/tokens_per_sec": throughput
+                "Throughput/tokens_per_sec": throughput,
+                "Learning Rate": lr
             }
         )
 
